@@ -1,41 +1,52 @@
-# FMP ETL Pipeline
+# Financial Modeling Prep ETL
 
-A data extraction, transformation, and loading (ETL) pipeline for Financial Modeling Prep (FMP) data.
+A Python-based ETL (Extract, Transform, Load) pipeline for financial data from the Financial Modeling Prep API.
 
-## Setup
+## Overview
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/sidobagga/fmp-etl.git
-   cd fmp-etl
-   ```
+This project provides tools to extract financial data from Financial Modeling Prep API (income statements, balance sheets, cash flow statements, analyst estimates, and more), transform it into structured formats, and load it into both SQLite and PostgreSQL databases.
 
-2. Create a virtual environment and install dependencies:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+## Features
 
-3. Create a `.env` file with your API keys and configuration:
-   ```
-   FMP_API_KEY=your_fmp_api_key_here
-   DB_HOST=localhost
-   DB_PORT=5432
-   DB_NAME=fmp_database
-   DB_USER=postgres
-   DB_PASSWORD=your_db_password_here
-   LOG_LEVEL=INFO
-   ```
+- **Data Extraction**: Fetches financial data from multiple FMP API endpoints
+- **Data Transformation**: Converts API responses to CSV format for easy analysis
+- **Data Loading**: Populates both traditional and consolidated database tables
+- **Multiple Company Support**: Process data for multiple ticker symbols (AAPL, MSFT, GOOGL, etc.)
+- **Database Compatibility**: Works with both SQLite (local) and PostgreSQL (remote)
+- **Database Validation**: Includes utilities to verify data integrity and perform sanity checks
+
+## Components
+
+- **financial_etl.py**: Main ETL script that handles the entire pipeline
+- **db_checks.py**: Utilities for validating database content and data quality
 
 ## Usage
 
-Run the ETL process:
-```
-python fmp-etl.py
+```bash
+# Run ETL with SQLite (default)
+python financial_etl.py --symbols AAPL,MSFT,GOOGL
+
+# Run ETL with PostgreSQL
+python financial_etl.py --symbols AAPL,MSFT,GOOGL --db-type postgres --db-name finmetrics
+
+# Perform database checks
+python db_checks.py
 ```
 
-## Notes
+## Requirements
 
-- The `.env` file is excluded from version control in the `.gitignore` file for security.
-- Make sure to update the `.env` file with your actual credentials.
+- Python 3.7+
+- pandas
+- requests
+- psycopg2 (for PostgreSQL support)
+- sqlite3 (included in Python standard library)
+
+## Database Schema
+
+The ETL process creates several tables:
+- Traditional tables for each data type (income_statements, balance_sheets, etc.)
+- Consolidated tables (financial_metrics, text_metrics) for more efficient querying
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

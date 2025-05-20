@@ -38,4 +38,4 @@ python fmp-etl.py
 ## Notes
 
 - The `.env` file is excluded from version control in the `.gitignore` file for security.
-- Make sure to update the `.env` file with your actual credentials. 
+- Make sure to update the `.env` file with your actual credentials.

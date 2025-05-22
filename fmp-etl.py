@@ -1446,17 +1446,71 @@ def migrate_data_to_database(master_df):
                     else:
                         # For PostgreSQL, use ON CONFLICT DO NOTHING
                         if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
+                            # Check if the table has a unique constraint on (symbol, date)
+                            cursor.execute(f"""
+                                SELECT COUNT(*)
+                                FROM pg_constraint pc
+                                JOIN pg_class c ON pc.conrelid = c.oid
+                                JOIN pg_namespace n ON c.relnamespace = n.oid
+                                JOIN pg_attribute a1 ON a1.attrelid = c.oid AND a1.attnum = ANY(pc.conkey)
+                                JOIN pg_attribute a2 ON a2.attrelid = c.oid AND a2.attnum = ANY(pc.conkey)
+                                WHERE c.relname = '{table_name}'
+                                  AND pc.contype = 'u'
+                                  AND a1.attname = 'symbol'
+                                  AND a2.attname = 'date'
+                            """)
+                            has_unique_constraint = cursor.fetchone()[0] > 0
+                            
+                            # If there's no unique constraint for financial_ratios, add one
+                            if not has_unique_constraint and table_name == 'financial_ratios':
+                                print(f"Adding unique constraint on (symbol, date) to {table_name}")
+                                
+                                # First, remove any duplicates
+                                cursor.execute(f"""
+                                    WITH duplicates AS (
+                                        SELECT id,
+                                               ROW_NUMBER() OVER (PARTITION BY symbol, date ORDER BY id) as row_num
+                                        FROM {table_name}
+                                    )
+                                    DELETE FROM {table_name}
+                                    WHERE id IN (
+                                        SELECT id FROM duplicates WHERE row_num > 1
+                                    )
+                                """)
+                                conn.commit()
+                                
+                                # Then add the constraint
+                                try:
+                                    cursor.execute(f"""
+                                        ALTER TABLE {table_name}
+                                        ADD CONSTRAINT {table_name}_symbol_date_unique UNIQUE (symbol, date)
+                                    """)
+                                    conn.commit()
+                                    has_unique_constraint = True
+                                    print(f"Added unique constraint to {table_name}")
+                                except Exception as e:
+                                    print(f"Error adding unique constraint to {table_name}: {e}")
+                            
                             # Prepare data for insertion
                             columns = filtered_df.columns.tolist()
                             quoted_columns = [f'"{col}"' for col in columns]
                             placeholders = ", ".join(["%s"] * len(columns))
                             
-                            # Build INSERT statement with conflict handling
-                            insert_sql = f"""
-                                INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
-                                VALUES ({placeholders}) 
-                                ON CONFLICT (symbol, date) DO NOTHING
-                            """
+                            # Build INSERT statement with appropriate conflict handling
+                            if has_unique_constraint:
+                                insert_sql = f"""
+                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                    VALUES ({placeholders}) 
+                                    ON CONFLICT (symbol, date) DO NOTHING
+                                """
+                            else:
+                                # For tables without unique constraint, use DO NOTHING without specifying columns
+                                # This will rely on primary key constraint if any
+                                insert_sql = f"""
+                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                    VALUES ({placeholders}) 
+                                    ON CONFLICT DO NOTHING
+                                """
                             
                             # Convert any None/NaN values to PostgreSQL NULL
                             filtered_df = filtered_df.where(pd.notnull(filtered_df), None)

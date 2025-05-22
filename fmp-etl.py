@@ -22,6 +22,12 @@ parser.add_argument('--symbols', type=str, help='Comma-separated list of ticker 
 parser.add_argument('--db-type', type=str, choices=['sqlite', 'postgres'], default='sqlite', help='Database type to use (default: sqlite)')
 parser.add_argument('--limit', type=int, default=3, help='Number of symbols to process (default: 3)')
 parser.add_argument('--db-name', type=str, help='Database name for PostgreSQL (default: finmetrics)')
+parser.add_argument('--db-host', type=str, default='orbe360.ai', help='Database host (default: orbe360.ai)')
+parser.add_argument('--db-port', type=int, default=5432, help='Database port (default: 5432)')
+parser.add_argument('--db-user', type=str, default='postgres', help='Database user (default: postgres)')
+parser.add_argument('--db-pass', type=str, default='Admin0rbE', help='Database password')
+parser.add_argument('--api-key', type=str, default='fjRDKKnsRnVNMfFepDM6ox31u9RlPklv', help='FMP API key')
+parser.add_argument('--mode', type=str, choices=['api', 'migrate', 'consolidate', 'calculate', 'price_targets', 'peers', 'annual', 'ratio', 'all'], default='all', help='ETL mode to run (default: all)')
 parser.add_argument('--price-targets-only', action='store_true', help='Only fetch price target data')
 parser.add_argument('--peers-only', action='store_true', help='Only fetch stock peers data')
 parser.add_argument('--peers-with-data', action='store_true', help='Fetch stock peers and their financial data')
@@ -29,18 +35,18 @@ parser.add_argument('--migrate-only', action='store_true', help='Only migrate CS
 args = parser.parse_args()
 
 # API configuration
-API_KEY = "fjRDKKnsRnVNMfFepDM6ox31u9RlPklv"
-BASE_URL = "https://financialmodelingprep.com/stable"
+API_KEY = args.api_key
+BASE_URL = "https://financialmodelingprep.com/api/v3"
 
 # Database configuration
 USE_SQLITE = args.db_type == 'sqlite'  # Default to SQLite for local testing
 SQLITE_DB_PATH = os.path.join('financial_data', 'financial_data.db')
 
 # PostgreSQL database details (only used if USE_SQLITE is False)
-PG_HOST = 'orbe360.ai'
-PG_PORT = 5432
-PG_USER = 'postgres'
-PG_PASSWORD = 'Admin0rbE'
+PG_HOST = args.db_host
+PG_PORT = args.db_port
+PG_USER = args.db_user
+PG_PASSWORD = args.db_pass
 PG_DB = args.db_name or 'finmetrics'
 
 # Configuration
@@ -1334,8 +1340,8 @@ def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.d
         return False
     
     # Create cursor
-    cursor = conn.cursor()
-    
+        cursor = conn.cursor()
+
     # For each table in the data dictionary
     for table_name, df in data_dict.items():
         if df is None or df.empty:
@@ -1347,7 +1353,7 @@ def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.d
             create_table(conn, cursor, table_name, df, db_type)
             
             # Remove duplicates - keep only the latest data for each symbol and date
-            if 'symbol' in df.columns and 'date' in df.columns:
+                    if 'symbol' in df.columns and 'date' in df.columns:
                 # Group by symbol and date and keep the last record
                 df = df.sort_values('date').groupby(['symbol', 'date']).last().reset_index()
             
@@ -1370,12 +1376,12 @@ def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.d
                     # Insert data
                     data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
                     cursor.executemany(insert_query, data_tuples)
-                    conn.commit()
+                            conn.commit()
                     
                     print(f"Inserted {len(filtered_df)} rows into {table_name}")
-                else:
-                    # For PostgreSQL, use ON CONFLICT DO NOTHING
-                    if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
+                    else:
+                        # For PostgreSQL, use ON CONFLICT DO NOTHING
+                        if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
                         # Check if the table has a unique constraint on (symbol, date)
                         cursor.execute(f"""
                             SELECT COUNT(*)
@@ -1386,11 +1392,11 @@ def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.d
                         """)
                         has_unique_constraint = cursor.fetchone()[0] > 0
                         
-                        # Prepare data for insertion
-                        columns = filtered_df.columns.tolist()
-                        quoted_columns = [f'"{col}"' for col in columns]
-                        placeholders = ", ".join(["%s"] * len(columns))
-                        
+                            # Prepare data for insertion
+                            columns = filtered_df.columns.tolist()
+                            quoted_columns = [f'"{col}"' for col in columns]
+                            placeholders = ", ".join(["%s"] * len(columns))
+                            
                         # Build INSERT statement with appropriate conflict handling
                         if has_unique_constraint and table_name == 'financial_ratios':
                             # For financial_ratios with unique constraint, use explicit column names
@@ -1402,74 +1408,74 @@ def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.d
                             print(f"Using ON CONFLICT (symbol, date) for {table_name}")
                         else:
                             # For tables without unique constraint, use simple INSERT
-                            insert_sql = f"""
-                                INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
-                                VALUES ({placeholders})
-                            """
+                                insert_sql = f"""
+                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                    VALUES ({placeholders}) 
+                                """
                             print(f"Using simple INSERT for {table_name} (no unique constraint)")
-                        
-                        # Convert any None/NaN values to PostgreSQL NULL
-                        filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                        
-                        # Insert data in chunks
-                        data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                        chunk_size = 1000
-                        inserted_count = 0
-                        
-                        for i in range(0, len(data_tuples), chunk_size):
-                            chunk = data_tuples[i:i + chunk_size]
+                                
+                                # Convert any None/NaN values to PostgreSQL NULL
+                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                                
+                                # Insert data in chunks
+                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                                chunk_size = 1000
+                                inserted_count = 0
+                                
+                                for i in range(0, len(data_tuples), chunk_size):
+                                    chunk = data_tuples[i:i + chunk_size]
                             try:
-                                cursor.executemany(insert_sql, chunk)
-                                inserted_count += cursor.rowcount
-                                conn.commit()
+                                    cursor.executemany(insert_sql, chunk)
+                                    inserted_count += cursor.rowcount
+                                    conn.commit()
                             except Exception as e:
                                 print(f"Error inserting chunk: {e}")
                                 conn.rollback()
-                        
+                                    
                         print(f"Inserted {inserted_count} rows into {table_name}")
-                    else:
+                            else:
                         # For tables without symbol/date columns, use simple INSERT
-                        columns = filtered_df.columns.tolist()
-                        quoted_columns = [f'"{col}"' for col in columns]
-                        placeholders = ", ".join(["%s"] * len(columns))
-                        
-                        # Build simple INSERT statement
-                        insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders})'
-                        
-                        # Convert any None/NaN values to PostgreSQL NULL
-                        filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                        
-                        # Insert data in chunks
-                        data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                        chunk_size = 1000
-                        for i in range(0, len(data_tuples), chunk_size):
-                            chunk = data_tuples[i:i + chunk_size]
-                            cursor.executemany(insert_sql, chunk)
-                            conn.commit()
-                        
+                                columns = filtered_df.columns.tolist()
+                                quoted_columns = [f'"{col}"' for col in columns]
+                                placeholders = ", ".join(["%s"] * len(columns))
+                                
+                                # Build simple INSERT statement
+                                insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders})'
+                                
+                                # Convert any None/NaN values to PostgreSQL NULL
+                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                                
+                                # Insert data in chunks
+                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                                chunk_size = 1000
+                                for i in range(0, len(data_tuples), chunk_size):
+                                    chunk = data_tuples[i:i + chunk_size]
+                                    cursor.executemany(insert_sql, chunk)
+                                    conn.commit()
+                                    
                         print(f"Inserted {len(filtered_df)} rows into {table_name}")
-            except Exception as e:
-                print(f"Error inserting {table_name} data: {e}")
+                except Exception as e:
+                    print(f"Error inserting {table_name} data: {e}")
                 traceback.print_exc()
-        except Exception as e:
+                except Exception as e:
             print(f"Error processing table {table_name}: {e}")
             traceback.print_exc()
             
     # Close the connection
-    conn.close()
+        conn.close()
     return True
 
-def migrate_to_consolidated_tables():
+def migrate_to_consolidated_tables(symbols=None):
     """Migrate data from traditional tables to consolidated financial_metrics and text_metrics tables"""
     print("Starting migration to consolidated tables...")
     
     # Migrate financial tables
     print("\nMigrating financial tables...")
-    migrate_financial_tables()
+    migrate_financial_tables(symbols)
     
     # Migrate text tables
     print("\nMigrating text tables...")
-    migrate_text_tables()
+    migrate_text_tables(symbols)
     
     print("\nMigration to consolidated tables completed successfully!")
 
@@ -1659,12 +1665,17 @@ def calculate_additional_metrics(metrics):
     
     return metrics
 
-def migrate_financial_tables():
+def migrate_financial_tables(symbols=None):
     """Migrate data from financial tables to consolidated financial_metrics table"""
     conn = connect_to_db()
     
     total_rows = 0
     skipped_rows = 0
+    processed_symbols = set()  # Track the symbols we're processing
+    
+    # Ensure constraints are in place
+    ensure_financial_ratios_constraint()
+    ensure_financial_metrics_constraint()
     
     try:
         for metric_type, table_name in FINANCIAL_TABLES.items():
@@ -1681,167 +1692,183 @@ def migrate_financial_tables():
                     cursor.execute(f"""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
-                            WHERE table_name = %s
+                            WHERE table_name = '{table_name}'
                         )
-                    """, (table_name,))
+                    """)
                     table_exists = cursor.fetchone()[0]
                 
             if not table_exists:
-                print(f"Table {table_name} does not exist in database, skipping...")
+                print(f"Source table {table_name} does not exist, skipping")
                 continue
             
-            # Check if the table has any data
-            if USE_SQLITE:
-                cursor = conn.cursor()
-                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                row_count = cursor.fetchone()[0]
-                cursor.close()
-                
-                if row_count == 0:
-                    print(f"Table {table_name} exists but is empty, skipping...")
-                    continue
-                    
-                print(f"Table {table_name} has {row_count} rows")
-            else:
-                with conn.cursor() as cursor:
-                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    row_count = cursor.fetchone()[0]
-                    
-                    if row_count == 0:
-                        print(f"Table {table_name} exists but is empty, skipping...")
-                        continue
-                        
-                    print(f"Table {table_name} has {row_count} rows")
+            print(f"Migrating data from {table_name} to financial_metrics")
             
-            # Get all data from source table
+            # Process rows from source table
             if USE_SQLITE:
+                # SQLite version
                 cursor = conn.cursor()
-                cursor.execute(f'SELECT * FROM "{table_name}"')
-                # Convert cursor rows to dictionaries
-                rows = []
+                # Add symbol filtering if specified
+                if symbols:
+                    placeholders = ', '.join(['?'] * len(symbols))
+                    cursor.execute(f"SELECT * FROM {table_name} WHERE symbol IN ({placeholders})", symbols)
+                else:
+                    cursor.execute(f"SELECT * FROM {table_name}")
+                columns = [description[0] for description in cursor.description]
+                
                 for row in cursor.fetchall():
-                    columns = [desc[0] for desc in cursor.description]
-                    rows.append(dict(zip(columns, row)))
-                cursor.close()
-            else:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute(f'SELECT * FROM "{table_name}"')
-                    rows = cursor.fetchall()
-            
-            print(f"Migrating {len(rows)} rows from {table_name} to financial_metrics...")
-            
-            # Process each row
-            for row in rows:
-                # Extract base fields
-                symbol = row.get('symbol')
-                date = row.get('date')
-                period = row.get('period')
-                reportedcurrency = row.get('reportedcurrency')
-                fiscalyear = row.get('fiscalyear')
-                data_source = row.get('data_source')
-                fiscalquarter = get_quarter_from_period(period)
-                
-                # Validate data before checking for duplicates
-                if not symbol or not date:
-                    print(f"Skipping record from {table_name} with missing symbol or date: ID={row.get('id', 'unknown')}")
-                    skipped_rows += 1
+                    row_dict = dict(zip(columns, row))
+                    symbol = row_dict.get('symbol')
+                    date = row_dict.get('date')
+                    
+                    if symbol:
+                        processed_symbols.add(symbol)
+                    
+                    if not symbol or not date:
+                        print(f"Skipping row with missing symbol or date: {row_dict}")
+                        skipped_rows += 1
                     continue
-                
-                # Standardize date format if it's a string
-                if isinstance(date, str):
-                    try:
-                        # Try to convert to standard date format YYYY-MM-DD
-                        date_obj = pd.to_datetime(date)
-                        date = date_obj.strftime('%Y-%m-%d')
-                    except:
-                        # If conversion fails, keep original
-                        pass
-                
-                # Check if data already exists for this symbol, date, and metric_type
-                if USE_SQLITE:
+                    
+                    # Standardize date format if it's a string
+                    if isinstance(date, str):
+                        try:
+                            date_obj = pd.to_datetime(date)
+                            date = date_obj.strftime('%Y-%m-%d')
+                        except:
+                            # Keep original if parsing fails
+                            pass
+                    
+                    # Extract base fields
+                    period = row_dict.get('period')
+                    reportedcurrency = row_dict.get('reportedcurrency')
+                    fiscalyear = row_dict.get('fiscalyear')
+                    data_source = row_dict.get('data_source', 'fmp')
+                    
+                    # Check for duplicate before inserting
                     check_cursor = conn.cursor()
                     check_cursor.execute("""
                         SELECT COUNT(*) FROM financial_metrics 
                         WHERE symbol = ? AND date = ? AND metric_type = ?
                     """, (symbol, date, metric_type))
-                    exists = check_cursor.fetchone()[0] > 0
+                    already_exists = check_cursor.fetchone()[0] > 0
                     check_cursor.close()
-                else:
+                    
+                    if already_exists:
+                        print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping")
+                        skipped_rows += 1
+                        continue
+                        
+                    # Build metric values
+                    metric_values = {}
+                    for key, value in row_dict.items():
+                        if key not in ['id', 'symbol', 'date', 'period', 'reportedcurrency', 
+                                       'fiscalyear', 'data_source', '_id'] and value is not None:
+                            metric_values[key] = value
+                    
+                    # Convert to JSON string
+                    metric_values_json = json.dumps(metric_values)
+                    
+                    # Insert into consolidated table
+                    insert_cursor = conn.cursor()
+                    insert_cursor.execute("""
+                        INSERT INTO financial_metrics 
+                        (symbol, date, period, reportedcurrency, fiscalyear, 
+                         data_source, metric_values, metric_type)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        symbol, date, period, reportedcurrency, fiscalyear,
+                        data_source, metric_values_json, metric_type
+                    ))
+                    insert_cursor.close()
+                    
+                    total_rows += 1
+                
+                cursor.close()
+                conn.commit()
+                
+            else:
+                # PostgreSQL version using RealDictCursor
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    # Add symbol filtering if specified
+                    if symbols:
+                        placeholders = ', '.join(['%s'] * len(symbols))
+                        cursor.execute(f"SELECT * FROM {table_name} WHERE symbol IN ({placeholders})", symbols)
+                    else:
+                        cursor.execute(f"SELECT * FROM {table_name}")
+                    
+                    for row in cursor:
+                symbol = row.get('symbol')
+                date = row.get('date')
+                        
+                        if symbol:
+                            processed_symbols.add(symbol)
+                        
+                        if not symbol or not date:
+                            print(f"Skipping row with missing symbol or date from {table_name}")
+                            skipped_rows += 1
+                            continue
+                        
+                        # Standardize date format if it's a string
+                        if isinstance(date, str):
+                            try:
+                                date_obj = pd.to_datetime(date)
+                                date = date_obj.strftime('%Y-%m-%d')
+                            except:
+                                # Keep original if parsing fails
+                                pass
+                        
+                        # Extract base fields
+                period = row.get('period')
+                reportedcurrency = row.get('reportedcurrency')
+                fiscalyear = row.get('fiscalyear')
+                        data_source = row.get('data_source', 'fmp')
+                        
+                        # Check for duplicate before inserting
                     with conn.cursor() as check_cursor:
                         check_cursor.execute("""
                             SELECT COUNT(*) FROM financial_metrics 
                             WHERE symbol = %s AND date = %s AND metric_type = %s
                         """, (symbol, date, metric_type))
-                        exists = check_cursor.fetchone()[0] > 0
+                            already_exists = check_cursor.fetchone()[0] > 0
                 
-                if exists:
-                    # Add more details to help debug the issue
-                    print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping. (Record ID: {row.get('id', 'unknown')})")
-                    # Log additional information only when debugging
-                    if metric_type in ['income', 'balance', 'cash_flow', 'ratio']:
-                        print(f"  Source: {table_name}, Fiscal year: {fiscalyear}, Period: {period}")
+                        if already_exists:
+                    print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping")
                     skipped_rows += 1
                     continue
                 
-                # Build metric values from remaining fields
+                        # Build metric values
                 metric_values = {}
                 for key, value in row.items():
-                    if key not in EXCLUDED_COLUMNS and value is not None:
-                        # Handle different data types
-                        if isinstance(value, pd.Timestamp):
-                            metric_values[key] = value.strftime('%Y-%m-%d')
-                        elif pd.isna(value):
-                            continue  # Skip NaN values
-                        else:
+                            if key not in ['id', 'symbol', 'date', 'period', 'reportedcurrency', 
+                                           'fiscalyear', 'data_source', '_id'] and value is not None:
                             metric_values[key] = value
                 
-                # Calculate additional metrics
-                if metric_type in ['income', 'balance', 'cash_flow', 'ratio']:
-                    # Add symbol and date for the calculation function
-                    metric_values['symbol'] = symbol
-                    metric_values['date'] = date
-                    metric_values = calculate_additional_metrics(metric_values)
-                
-                # Insert into financial_metrics table
+                        # Convert to JSON
                 metric_values_json = json.dumps(metric_values)
                 
-                if USE_SQLITE:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO financial_metrics 
-                        (symbol, date, period, reportedcurrency, fiscalyear, 
-                         fiscalquarter, data_source, metric_values, metric_type)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        symbol, date, period, reportedcurrency, fiscalyear,
-                        fiscalquarter, data_source, metric_values_json, metric_type
-                    ))
-                    conn.commit()
-                    cursor.close()
-                else:
+                        # Insert into consolidated table
                     with conn.cursor() as insert_cursor:
                         insert_cursor.execute("""
                             INSERT INTO financial_metrics 
                             (symbol, date, period, reportedcurrency, fiscalyear, 
-                             fiscalquarter, data_source, metric_values, metric_type)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
-                            ON CONFLICT DO NOTHING
+                                 data_source, metric_values, metric_type)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                                ON CONFLICT (symbol, date, metric_type) DO NOTHING
                         """, (
                             symbol, date, period, reportedcurrency, fiscalyear,
-                            fiscalquarter, data_source, metric_values_json, metric_type
+                                data_source, metric_values_json, metric_type
                         ))
                 
                 total_rows += 1
     
+        print(f"Migration complete: {total_rows} rows inserted, {skipped_rows} rows skipped")
+        print(f"Processed symbols: {', '.join(sorted(processed_symbols))}")
+        
     except Exception as e:
-        print(f"Error during financial table migration: {e}")
-        sys.exit(1)
+        print(f"Error during migration: {e}")
     finally:
         conn.close()
     
-    print(f"Successfully migrated {total_rows} rows to financial_metrics table (skipped {skipped_rows} existing rows)")
-
-def migrate_text_tables():
+def migrate_text_tables(symbols=None):
     """Migrate data from text-based tables to consolidated text_metrics table"""
     conn = connect_to_db()
     
@@ -1906,6 +1933,11 @@ def migrate_text_tables():
             # Get all data from source table
             if USE_SQLITE:
                 cursor = conn.cursor()
+                # Add symbol filtering if specified
+                if symbols:
+                    placeholders = ', '.join(['?'] * len(symbols))
+                    cursor.execute(f'SELECT * FROM "{table_name}" WHERE symbol IN ({placeholders})', symbols)
+                else:
                 cursor.execute(f'SELECT * FROM "{table_name}"')
                 # Convert cursor rows to dictionaries
                 rows = []
@@ -1915,6 +1947,11 @@ def migrate_text_tables():
                 cursor.close()
             else:
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Add symbol filtering if specified
+                    if symbols:
+                        placeholders = ', '.join(['%s'] * len(symbols))
+                        cursor.execute(f'SELECT * FROM "{table_name}" WHERE symbol IN ({placeholders})', symbols)
+                    else:
                     cursor.execute(f'SELECT * FROM "{table_name}"')
                     rows = cursor.fetchall()
             
@@ -2567,78 +2604,609 @@ def fetch_peers_data(symbol):
         except Exception as e:
             print(f"Error fetching financial data for peer {peer_symbol}: {e}")
 
+def ensure_financial_ratios_constraint():
+    """Ensure the financial_ratios table has the necessary unique constraint on (symbol, date)"""
+    print("Checking financial_ratios table for unique constraint...")
+    
+    if USE_SQLITE:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='financial_ratios'")
+            if not cursor.fetchone():
+                print("financial_ratios table does not exist in SQLite, skipping constraint check")
+        return
+    
+            # Check if the constraint exists
+            cursor.execute("PRAGMA index_list('financial_ratios')")
+            has_unique_constraint = False
+            for row in cursor.fetchall():
+                if row[2] == 1:  # is_unique column
+                    cursor.execute(f"PRAGMA index_info('{row[1]}')")
+                    columns = [info[2] for info in cursor.fetchall()]
+                    if set(columns) == set(['symbol', 'date']):
+                        has_unique_constraint = True
+                        break
+            
+            if not has_unique_constraint:
+                print("Adding unique constraint to financial_ratios table in SQLite")
+                # First check for duplicates
+                cursor.execute("""
+                    SELECT symbol, date, COUNT(*)
+                    FROM financial_ratios
+                    GROUP BY symbol, date
+                    HAVING COUNT(*) > 1
+                """)
+                duplicates = cursor.fetchall()
+                if duplicates:
+                    print(f"Found {len(duplicates)} symbol-date combinations with duplicates")
+                    # Keep only one row for each symbol-date combination
+                    for symbol, date, count in duplicates:
+                        cursor.execute("""
+                            DELETE FROM financial_ratios
+                            WHERE id IN (
+                                SELECT id FROM financial_ratios
+                                WHERE symbol = ? AND date = ?
+                                ORDER BY id
+                                LIMIT -1 OFFSET 1
+                            )
+                        """, (symbol, date))
+                    conn.commit()
+                    print(f"Removed duplicates from financial_ratios table")
+                
+                # Add unique constraint
+                cursor.execute("CREATE UNIQUE INDEX idx_financial_ratios_symbol_date ON financial_ratios(symbol, date)")
+                conn.commit()
+                print("Added unique constraint to financial_ratios table in SQLite")
+            else:
+                print("financial_ratios table already has unique constraint in SQLite")
+        except Exception as e:
+            print(f"Error ensuring SQLite constraint: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'financial_ratios'
+                )
+            """)
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("financial_ratios table does not exist in PostgreSQL, skipping constraint check")
+        return
+    
+            # Check if unique constraint exists
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM pg_constraint pc
+                JOIN pg_class c ON pc.conrelid = c.oid
+                WHERE c.relname = 'financial_ratios'
+                  AND pc.contype = 'u'
+            """)
+            has_unique_constraint = cursor.fetchone()[0] > 0
+            
+            if not has_unique_constraint:
+                print("Adding unique constraint to financial_ratios table in PostgreSQL")
+                # First check for duplicates
+                cursor.execute("""
+                    SELECT symbol, date, COUNT(*)
+                    FROM financial_ratios
+                    GROUP BY symbol, date
+                    HAVING COUNT(*) > 1
+                """)
+                duplicates = cursor.fetchall()
+                if duplicates:
+                    print(f"Found {len(duplicates)} symbol-date combinations with duplicates")
+                    # Keep only one row for each symbol-date combination
+                    for symbol, date, count in duplicates:
+                        cursor.execute("""
+                            WITH duplicates AS (
+                                SELECT id,
+                                      ROW_NUMBER() OVER (PARTITION BY symbol, date ORDER BY id) as row_num
+                                FROM financial_ratios
+                                WHERE symbol = %s AND date = %s
+                            )
+                            DELETE FROM financial_ratios
+                            WHERE id IN (SELECT id FROM duplicates WHERE row_num > 1)
+                        """, (symbol, date))
+                    conn.commit()
+                    print(f"Removed duplicates from financial_ratios table")
+                
+                # Add unique constraint
+                cursor.execute("""
+                    ALTER TABLE financial_ratios
+                    ADD CONSTRAINT financial_ratios_symbol_date_unique UNIQUE (symbol, date)
+                """)
+                conn.commit()
+                print("Added unique constraint to financial_ratios table in PostgreSQL")
+            else:
+                print("financial_ratios table already has unique constraint in PostgreSQL")
+                
+            # Make sure we also have a mapping from calendarYear to fiscalyear
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'financial_ratios'
+            """)
+            column_names = [row[0].lower() for row in cursor.fetchall()]
+            print(f"financial_ratios has {len(column_names)} columns")
+            
+            # Make sure we're aware of the mapping needed for the API response
+            print("Note: API may return 'calendarYear' field which should be mapped to 'fiscalyear' if exists")
+            
+        except Exception as e:
+            print(f"Error ensuring PostgreSQL constraint: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+
+def process_financial_ratios(data, overwrite=False):
+    """Process financial ratios data and insert into database"""
+    if not data:
+        print("No financial ratios data provided.")
+        return
+        
+    conn = connect_to_db()
+    cur = conn.cursor()
+    
+    try:
+        # Preprocess financial ratios data
+        processed_data = []
+        symbols_processed = set()
+        
+        for item in data:
+            symbol = item.get('symbol')
+            if symbol:
+                symbols_processed.add(symbol)
+                
+            # Process date field
+            if 'date' in item and item['date']:
+                # Try to standardize date format for consistent comparisons
+                try:
+                    date_obj = pd.to_datetime(item['date'])
+                    item['date'] = date_obj.strftime('%Y-%m-%d')
+                except:
+                    # If conversion fails, keep original
+                    pass
+                
+            # Validate key fields
+            if not symbol or not item.get('date'):
+                print(f"Skipping financial ratio with missing symbol or date: {json.dumps(item)[:100]}...")
+                continue
+                
+            processed_data.append(item)
+        
+        print(f"Processing financial ratios for symbols: {', '.join(symbols_processed)}")
+        
+        # Process the pre-processed data
+        insert_count = 0
+        skipped_count = 0
+        
+        # First check if table has the required unique constraint
+        has_unique_constraint = False
+        if not USE_SQLITE:
+            cur.execute("""
+                SELECT conname AS constraint_name, 
+                       pg_catalog.pg_get_constraintdef(pc.oid) AS constraint_def
+                FROM pg_constraint pc
+                JOIN pg_class c ON pc.conrelid = c.oid
+                WHERE c.relname = 'financial_ratios'
+                  AND pc.contype = 'u'
+            """)
+            constraints = cur.fetchall()
+            for constraint in constraints:
+                if 'UNIQUE (symbol, date)' in constraint[1]:
+                    has_unique_constraint = True
+                    print("Found unique constraint on financial_ratios(symbol, date)")
+                    break
+            
+            if not has_unique_constraint:
+                print("WARNING: No unique constraint found on financial_ratios(symbol, date). ON CONFLICT clause will be disabled.")
+
+            # Get the actual column names from the database for case mapping
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'financial_ratios'
+            """)
+            db_columns = [row[0].lower() for row in cur.fetchall()]
+            print(f"Database has {len(db_columns)} columns for financial_ratios table")
+        
+        for item in processed_data:
+            symbol = item.get('symbol')
+            date = item.get('date')
+            
+            # Check if data already exists in financial_ratios or financial_metrics
+            exists = False
+            
+            if USE_SQLITE:
+                # Check in financial_ratios
+                cur.execute("""
+                    SELECT COUNT(*) FROM financial_ratios 
+                    WHERE symbol = ? AND date = ?
+                """, (symbol, date))
+                exists = cur.fetchone()[0] > 0
+                
+                # Also check in financial_metrics with metric_type = 'ratio'
+                if not exists:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM financial_metrics 
+                        WHERE symbol = ? AND date = ? AND metric_type = 'ratio'
+                    """, (symbol, date))
+                    exists = cur.fetchone()[0] > 0
+            else:
+                # Check in financial_ratios
+                cur.execute("""
+                    SELECT COUNT(*) FROM financial_ratios 
+                    WHERE symbol = %s AND date = %s
+                """, (symbol, date))
+                exists = cur.fetchone()[0] > 0
+                
+                # Also check in financial_metrics with metric_type = 'ratio'
+                if not exists:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM financial_metrics 
+                        WHERE symbol = %s AND date = %s AND metric_type = 'ratio'
+                    """, (symbol, date))
+                    exists = cur.fetchone()[0] > 0
+            
+            if exists and not overwrite:
+                skipped_count += 1
+                print(f"Data already exists for {symbol}, {date} - skipping.")
+                continue
+            
+            # Prepare data with proper case handling for PostgreSQL
+            if not USE_SQLITE:
+                # Convert API column names to match database column names (case-sensitive)
+                processed_item = {}
+                for key, value in item.items():
+                    # Convert API keys to lowercase to match DB column names
+                    db_key = key.lower()
+                    
+                    # Map calendarYear to fiscalyear if needed
+                    if db_key == 'calendaryear' and 'fiscalyear' in db_columns:
+                        db_key = 'fiscalyear'
+                        
+                    # Only include fields that exist in the database
+                    if db_key in db_columns and key not in ["_id", "id"]:
+                        processed_item[db_key] = value
+                
+                # Column names for insertion
+                columns = list(processed_item.keys())
+                placeholders = ['%s'] * len(columns)
+                values = [processed_item[col] for col in columns]
+            else:
+                # For SQLite (less case sensitive)
+                columns = []
+                placeholders = []
+                values = []
+                
+                for key, value in item.items():
+                    if key not in ["_id", "id"]:  # Exclude MongoDB objectId and any id field
+                        # For SQLite, just handle calendarYear mapping if needed
+                        if key.lower() == 'calendaryear':
+                            key = 'fiscalyear'
+                        columns.append(key)
+                        values.append(value)
+                        placeholders.append('?')
+            
+            # Generate INSERT or UPSERT statement based on database type
+            if USE_SQLITE:
+                query = f"""
+                    INSERT INTO financial_ratios ({', '.join(columns)})
+                    VALUES ({', '.join(placeholders)})
+                """
+            else:
+                query = f"""
+                    INSERT INTO financial_ratios ({', '.join(columns)})
+                    VALUES ({', '.join(placeholders)})
+                """
+                
+                # Add ON CONFLICT clause only if we have the unique constraint
+                if has_unique_constraint:
+                    # Build update columns excluding symbol and date
+                    update_columns = []
+                    for col in columns:
+                        if col not in ['symbol', 'date']:
+                            update_columns.append(f"{col} = EXCLUDED.{col}")
+                    
+                    if update_columns:
+                        query += f"""
+                        ON CONFLICT (symbol, date) DO UPDATE SET 
+                        {", ".join(update_columns)}
+                        """
+                    else:
+                        # If no columns to update, use DO NOTHING
+                        query += " ON CONFLICT (symbol, date) DO NOTHING"
+                
+            # Execute INSERT or UPSERT query
+            try:
+                cur.execute(query, tuple(values))
+                insert_count += 1
+            except Exception as e:
+                print(f"Error inserting financial ratio for {symbol}, {date}: {e}")
+                print(f"Query: {query}")
+                print(f"Column count: {len(columns)}, Value count: {len(values)}")
+        
+        # Commit all changes to database
+        conn.commit()
+        
+        print(f"Successfully processed {insert_count} financial ratios (skipped {skipped_count} existing records)")
+        
+    except Exception as e:
+        print(f"Error processing financial ratios: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+def ensure_financial_metrics_constraint():
+    """Ensure financial_metrics table has unique constraint on (symbol, date, metric_type)"""
+    print("Checking financial_metrics table for unique constraint...")
+    
+    if USE_SQLITE:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='financial_metrics'")
+            if not cursor.fetchone():
+                print("financial_metrics table does not exist in SQLite, skipping constraint check")
+                return
+            
+            # Check if the constraint exists
+            cursor.execute("PRAGMA index_list('financial_metrics')")
+            has_unique_constraint = False
+            for row in cursor.fetchall():
+                if row[2] == 1:  # is_unique column
+                    cursor.execute(f"PRAGMA index_info('{row[1]}')")
+                    columns = [info[2] for info in cursor.fetchall()]
+                    if set(columns) == set(['symbol', 'date', 'metric_type']):
+                        has_unique_constraint = True
+                        break
+            
+            if not has_unique_constraint:
+                print("Adding unique constraint to financial_metrics table in SQLite")
+                # First check for duplicates
+                cursor.execute("""
+                    SELECT symbol, date, metric_type, COUNT(*)
+                    FROM financial_metrics
+                    GROUP BY symbol, date, metric_type
+                    HAVING COUNT(*) > 1
+                """)
+                duplicates = cursor.fetchall()
+                if duplicates:
+                    print(f"Found {len(duplicates)} symbol-date-metric_type combinations with duplicates")
+                    # Keep only one row for each symbol-date-metric_type combination
+                    for symbol, date, metric_type, count in duplicates:
+                        cursor.execute("""
+                            DELETE FROM financial_metrics
+                            WHERE id IN (
+                                SELECT id FROM financial_metrics
+                                WHERE symbol = ? AND date = ? AND metric_type = ?
+                                ORDER BY id
+                                LIMIT -1 OFFSET 1
+                            )
+                        """, (symbol, date, metric_type))
+                    conn.commit()
+                    print(f"Removed duplicates from financial_metrics table")
+                
+                # Add unique constraint
+                cursor.execute("CREATE UNIQUE INDEX idx_financial_metrics_symbol_date_metric_type ON financial_metrics(symbol, date, metric_type)")
+                conn.commit()
+                print("Added unique constraint to financial_metrics table in SQLite")
+            else:
+                print("financial_metrics table already has unique constraint in SQLite")
+        except Exception as e:
+            print(f"Error ensuring SQLite constraint on financial_metrics: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'financial_metrics'
+                )
+            """)
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("financial_metrics table does not exist in PostgreSQL, skipping constraint check")
+                return
+            
+            # Check if unique constraint exists
+            cursor.execute("""
+                SELECT conname AS constraint_name, pg_catalog.pg_get_constraintdef(pc.oid) AS constraint_def
+                FROM pg_constraint pc
+                JOIN pg_class c ON pc.conrelid = c.oid
+                WHERE c.relname = 'financial_metrics'
+                  AND pc.contype = 'u'
+            """)
+            
+            constraints = cursor.fetchall()
+            has_constraint = False
+            
+            for constraint in constraints:
+                if 'UNIQUE (symbol, date, metric_type)' in constraint[1]:
+                    has_constraint = True
+                    print(f"Found unique constraint on financial_metrics: {constraint[0]}")
+                    break
+            
+            if not has_constraint:
+                print("Adding unique constraint to financial_metrics table in PostgreSQL")
+                # First check for duplicates
+                cursor.execute("""
+                    SELECT symbol, date, metric_type, COUNT(*)
+                    FROM financial_metrics
+                    GROUP BY symbol, date, metric_type
+                    HAVING COUNT(*) > 1
+                """)
+                duplicates = cursor.fetchall()
+                if duplicates:
+                    print(f"Found {len(duplicates)} symbol-date-metric_type combinations with duplicates")
+                    # Keep only one row for each symbol-date-metric_type combination
+                    for symbol, date, metric_type, count in duplicates:
+                        cursor.execute("""
+                            WITH duplicates AS (
+                                SELECT id,
+                                      ROW_NUMBER() OVER (PARTITION BY symbol, date, metric_type ORDER BY id) as row_num
+                                FROM financial_metrics
+                                WHERE symbol = %s AND date = %s AND metric_type = %s
+                            )
+                            DELETE FROM financial_metrics
+                            WHERE id IN (SELECT id FROM duplicates WHERE row_num > 1)
+                        """, (symbol, date, metric_type))
+                    conn.commit()
+                    print(f"Removed duplicates from financial_metrics table")
+                
+                # Add unique constraint
+                cursor.execute("""
+                    ALTER TABLE financial_metrics
+                    ADD CONSTRAINT financial_metrics_symbol_date_metric_type_unique UNIQUE (symbol, date, metric_type)
+                """)
+                conn.commit()
+                print("Added unique constraint to financial_metrics table in PostgreSQL")
+            else:
+                print("financial_metrics table already has unique constraint in PostgreSQL")
+        except Exception as e:
+            print(f"Error ensuring PostgreSQL constraint on financial_metrics: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+
 def main():
     """Main function to run the entire ETL process"""
-    print(f"Starting financial data ETL process for {len(SYMBOLS)} symbols using {('SQLite' if USE_SQLITE else 'PostgreSQL')}")
+    print("Starting Financial Data ETL Process...")
     
-    # If price-targets-only flag is set, only fetch price target data
+    # Handle legacy argument mapping
     if args.price_targets_only:
-        fetch_price_targets_only(SYMBOLS)
-        print("\nPrice target data fetching completed!")
-        return
+        mode = 'price_targets'
+    elif args.peers_only:
+        mode = 'peers'
+    elif args.migrate_only:
+        mode = 'migrate'
+    else:
+        mode = args.mode
     
-    # If peers-only flag is set, only fetch stock peers data
-    if args.peers_only or args.peers_with_data:
-        fetch_peers_only(SYMBOLS)
-        print("\nStock peers data fetching completed!")
-        return
-    
-    # If migrate-only flag is set, skip data collection and just migrate CSV to database
-    if args.migrate_only:
-        print("\n--- STEP 3: Creating master CSV ---")
-        master_df = create_master_csv()
-        
-        print("\n--- STEP 4: Migrating data to database ---")
-        migrate_data_to_database(master_df)
-        
-        print("\n--- STEP 5: Migrating data to consolidated tables ---")
-        migrate_to_consolidated_tables()
-        
-        print("\nData migration completed!")
-        return
-        
-    # Step 1: Collect financial data from FMP API with concurrent requests
-    print("\n--- STEP 1: Collecting data from FMP API ---")
-    
-    # Use a thread pool to process symbols concurrently
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as executor:
-        # Submit symbol processing tasks
-        future_to_symbol = {executor.submit(process_symbol_data, symbol): symbol for symbol in SYMBOLS}
-        
-        # Process results as they complete
-        for future in concurrent.futures.as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
-            try:
-                result = future.result()
-                print(result)
-            except Exception as e:
-                print(f"Symbol {symbol} generated an exception: {e}")
-    
-    # Step 2: Consolidate CSV files
-    print("\n--- STEP 2: Consolidating CSV files ---")
-    create_consolidated_files()
-    
-    # Step 3: Create master CSV with all data
-    print("\n--- STEP 3: Creating master CSV ---")
-    master_df = create_master_csv()
-    
-    # Step 4: Create database schema
-    print("\n--- STEP 4: Creating database schema ---")
+    # Create database schema if needed
+    print("Creating database schema...")
     create_database_schema()
     
-    # Step 5: Migrate data to database
-    print("\n--- STEP 5: Migrating data to database ---")
-    migrate_data_to_database(master_df)
+    # Ensure necessary constraints are in place
+    print("Ensuring database constraints...")
+    ensure_financial_ratios_constraint()
+    ensure_financial_metrics_constraint()
     
-    # Step 6: Migrate data to consolidated tables
-    print("\n--- STEP 6: Migrating data to consolidated tables ---")
-    migrate_to_consolidated_tables()
+    # Handle symbol selection
+    if args.symbols:
+        symbols_to_process = args.symbols.split(',')
+    else:
+        symbols_to_process = SYMBOLS
     
-    db_type = "SQLite" if USE_SQLITE else "PostgreSQL"
-    db_location = SQLITE_DB_PATH if USE_SQLITE else f"{PG_DB} on {PG_HOST}"
+    print(f"Processing symbols: {', '.join(symbols_to_process)}")
     
-    print("\nFinancial data ETL process completed successfully!")
-    print(f"Data for {len(SYMBOLS)} symbols has been processed and stored in {db_type} database at {db_location}")
+    # Process based on mode
+    if mode == 'price_targets':
+        print("Mode: Price targets only")
+        fetch_price_targets_only(symbols_to_process)
+    elif mode == 'peers':
+        print("Mode: Stock peers only")
+        fetch_peers_only(symbols_to_process)
+    elif mode == 'ratio':
+        print("Mode: Financial ratios only")
+        for symbol in symbols_to_process:
+            print(f"Fetching financial ratios for {symbol}")
+            ratios_data = fetch_financial_ratios(symbol)
+            if ratios_data:
+                process_financial_ratios(ratios_data)
+    elif mode == 'api':
+        print("Mode: API data fetch only")
+        for symbol in symbols_to_process:
+            process_symbol_data(symbol)
+    elif mode == 'migrate':
+        print("Mode: Migration only")
+        create_consolidated_files()
+        migrate_to_consolidated_tables(symbols_to_process)
+    elif mode == 'consolidate':
+        print("Mode: Consolidation only")
+        migrate_to_consolidated_tables(symbols_to_process)
+    elif mode == 'all':
+        print("Mode: Full ETL process")
+        # Step 1: Fetch API data
+        for symbol in symbols_to_process:
+            print(f"Processing symbol: {symbol}")
+            process_symbol_data(symbol)
+        
+        # Step 2: Process financial ratios separately
+        for symbol in symbols_to_process:
+            print(f"Processing financial ratios for {symbol}")
+            ratios_data = fetch_financial_ratios(symbol)
+            if ratios_data:
+                process_financial_ratios(ratios_data)
+        
+        # Step 3: Create consolidated files and migrate
+        print("Creating consolidated files...")
+        create_consolidated_files()
+        
+        print("Migrating to consolidated tables...")
+        migrate_to_consolidated_tables(symbols_to_process)
+    else:
+        print(f"Unknown mode: {mode}")
+        
+    print("ETL process completed!")
+
+def fetch_financial_ratios(symbol):
+    """Fetch financial ratios data for a given symbol"""
+    url = f"{BASE_URL}/ratios/{symbol}?apikey={API_KEY}&limit=120"
+    
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Process the financial ratios data
+            processed_data = []
+            
+            for item in data:
+                # Add symbol field if missing
+                if 'symbol' not in item:
+                    item['symbol'] = symbol
+                    
+                # Fix date format if needed
+                date = item.get('date')
+                if date:
+                    try:
+                        date_obj = pd.to_datetime(date)
+                        item['date'] = date_obj.strftime('%Y-%m-%d')
+                    except:
+                        # Keep original if conversion fails
+                        pass
+                
+                # Add data_source field
+                item['data_source'] = 'fmp'
+                
+                processed_data.append(item)
+            
+            print(f"Found {len(processed_data)} financial ratios records for {symbol}")
+            return processed_data
+        else:
+            print(f"Failed to fetch financial ratios data for {symbol}: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error fetching financial ratios for {symbol}: {e}")
+        return None
 
 if __name__ == "__main__":
     main() 

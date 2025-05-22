@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 import concurrent.futures
 import argparse
+import numpy as np
+import traceback
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Financial data ETL process')
@@ -1304,324 +1306,158 @@ def convert_date_format(df):
     
     return df
 
-def migrate_data_to_database(master_df):
-    """Migrate data to database (SQLite or PostgreSQL)"""
-    if master_df is None or master_df.empty:
-        print("No data to migrate to database")
-        return
-
-    try:
-        conn = connect_to_db()
-        cursor = conn.cursor()
-
-        # Process consolidated CSVs for traditional tables
-        consolidated_dir = os.path.join(OUTPUT_DIR, "consolidated")
+def migrate_data_to_database(data_dict, db_type='sqlite', db_path='./insightdb.db', db_host='localhost', db_port=5432, db_name='insight', db_user='postgres', db_password='password'):
+    """
+    Migrate data to the database
+    """
+    # Connect to the appropriate database
+    if db_type.lower() == 'sqlite':
+        # SQLite connection
+        conn = sqlite3.connect(db_path)
+        print(f"Connected to SQLite database: {db_path}")
+    elif db_type.lower() == 'postgres':
+        # PostgreSQL connection
+        try:
+            conn = psycopg2.connect(
+                host=db_host,
+                port=db_port,
+                database=db_name,
+                user=db_user,
+                password=db_password
+            )
+            print(f"Connected to PostgreSQL database: {db_name} on {db_host}")
+        except Exception as e:
+            print(f"Error connecting to PostgreSQL: {e}")
+            return False
+    else:
+        print(f"Unsupported database type: {db_type}")
+        return False
+    
+    # Create cursor
+    cursor = conn.cursor()
+    
+    # For each table in the data dictionary
+    for table_name, df in data_dict.items():
+        if df is None or df.empty:
+            print(f"No data to insert for table: {table_name}")
+            continue
         
-        # Direct mapping for table names - use actual table names as file prefix
-        # This simplifies the matching logic
-        table_names = [
-            'income_statements',
-            'balance_sheets', 
-            'cash_flow_statements',
-            'financial_ratios',
-            'analyst_estimates',
-            'earnings_transcripts',
-            'company_news'
-        ]
-        
-        # Get a list of the actual files in the consolidated directory
-        consolidated_files = os.listdir(consolidated_dir)
-        print(f"Found consolidated files: {consolidated_files}")
-        
-        # Loop through each table name and check for matching files
-        for table_name in table_names:
-            # Look for exact table name match
-            target_file = f"{table_name}_all_data.csv"
+        try:
+            # Create table if it doesn't exist
+            create_table(conn, cursor, table_name, df, db_type)
             
-            if target_file in consolidated_files:
-                file_path = os.path.join(consolidated_dir, target_file)
-                
-                print(f"Processing {table_name} data from {target_file}")
-                
-                try:
-                    df = pd.read_csv(file_path)
+            # Remove duplicates - keep only the latest data for each symbol and date
+            if 'symbol' in df.columns and 'date' in df.columns:
+                # Group by symbol and date and keep the last record
+                df = df.sort_values('date').groupby(['symbol', 'date']).last().reset_index()
+            
+            # Add additional system fields to track data
+            df['data_source'] = 'fmp_api'  # Mark the source of the data
+            
+            # Filter out any NaN values and convert DataFrame to JSON
+            filtered_df = df.replace({np.nan: None})
+            
+            # Handle data insertion based on database type
+            try:
+                if db_type.lower() == 'sqlite':
+                    # For SQLite, we need to handle conflict differently
+                    columns = filtered_df.columns.tolist()
+                    placeholders = ", ".join(["?"] * len(columns))
                     
-                    # Convert column names to lowercase and replace spaces/hyphens with underscores
-                    df.columns = [col.lower().replace(' ', '_').replace('-', '_') for col in df.columns]
+                    # Build INSERT OR REPLACE statement
+                    insert_query = f'INSERT OR REPLACE INTO {table_name} ({", ".join(columns)}) VALUES ({placeholders})'
                     
-                    # Drop duplicates if any
-                    if 'symbol' in df.columns and 'date' in df.columns:
-                        df = df.drop_duplicates(subset=['symbol', 'date'], keep='first')
+                    # Insert data
+                    data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                    cursor.executemany(insert_query, data_tuples)
+                    conn.commit()
                     
-                    if df.empty:
-                        print(f"No data in {target_file}, skipping")
-                        continue
-
-                    # Convert date columns to appropriate format
-                    df = convert_date_format(df)
-                    
-                    # Get the actual columns in the database table
-                    if USE_SQLITE:
-                        cursor.execute(f"PRAGMA table_info({table_name})")
-                        table_columns = [row[1] for row in cursor.fetchall()]  # column name is at index 1
-                    else:
+                    print(f"Inserted {len(filtered_df)} rows into {table_name}")
+                else:
+                    # For PostgreSQL, use ON CONFLICT DO NOTHING
+                    if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
+                        # Check if the table has a unique constraint on (symbol, date)
                         cursor.execute(f"""
-                            SELECT column_name FROM information_schema.columns
-                            WHERE table_name = '{table_name}'
+                            SELECT COUNT(*)
+                            FROM pg_constraint pc
+                            JOIN pg_class c ON pc.conrelid = c.oid
+                            WHERE c.relname = '{table_name}'
+                              AND pc.contype = 'u'
                         """)
-                        table_columns = [row[0] for row in cursor.fetchall()]
-                    
-                    print(f"Table columns: {table_columns}")
-                    
-                    # Filter dataframe to only include columns that exist in the table
-                    # First, find which dataframe columns match table columns (case-insensitive)
-                    df_columns = df.columns.tolist()
-                    
-                    # Create mapping from df columns to table columns
-                    column_mapping = {}
-                    for df_col in df_columns:
-                        for table_col in table_columns:
-                            if df_col.lower() == table_col.lower():
-                                column_mapping[df_col] = table_col
-                                break
-                    
-                    if not column_mapping:
-                        print(f"No matching columns found for {table_name}, skipping")
-                        continue
-                    
-                    # Create a new dataframe with only the columns that exist in the table
-                    filtered_df = df[list(column_mapping.keys())].copy()
-                    
-                    # Rename columns to match the table schema
-                    filtered_df.rename(columns=column_mapping, inplace=True)
-                    
-                    # Print the matching columns being inserted
-                    print(f"Found {len(filtered_df.columns)} matching columns: {filtered_df.columns.tolist()}")
-                    print(f"Found {len(filtered_df)} rows to insert into {table_name}")
-                    
-                    # Count of records inserted and skipped
-                    inserted_count = 0
-                    skipped_count = 0
-                    
-                    if USE_SQLITE:
-                        # For SQLite, check each row for existence before inserting
-                        if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
-                            # Convert filtered_df to a list of dictionaries for easier processing
-                            records = filtered_df.to_dict('records')
-                            
-                            for record in records:
-                                # Check if record already exists
-                                symbol = record.get('symbol')
-                                date = record.get('date')
-                                
-                                if symbol and date:
-                                    cursor.execute(f"""
-                                        SELECT COUNT(*) FROM {table_name} 
-                                        WHERE symbol = ? AND date = ?
-                                    """, (symbol, date))
-                                    
-                                    if cursor.fetchone()[0] > 0:
-                                        skipped_count += 1
-                                        continue
-                                
-                                # Build placeholders and values for the INSERT
-                                placeholders = ', '.join(['?'] * len(record))
-                                columns = ', '.join(record.keys())
-                                values = list(record.values())
-                                
-                                # Insert the record
-                                cursor.execute(f"""
-                                    INSERT INTO {table_name} ({columns})
-                                    VALUES ({placeholders})
-                                """, values)
-                                
-                                inserted_count += 1
-                            
-                            conn.commit()
-                            print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
+                        has_unique_constraint = cursor.fetchone()[0] > 0
+                        
+                        # Prepare data for insertion
+                        columns = filtered_df.columns.tolist()
+                        quoted_columns = [f'"{col}"' for col in columns]
+                        placeholders = ", ".join(["%s"] * len(columns))
+                        
+                        # Build INSERT statement with appropriate conflict handling
+                        if has_unique_constraint and table_name == 'financial_ratios':
+                            # For financial_ratios with unique constraint, use explicit column names
+                            insert_sql = f"""
+                                INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                VALUES ({placeholders}) 
+                                ON CONFLICT (symbol, date) DO NOTHING
+                            """
+                            print(f"Using ON CONFLICT (symbol, date) for {table_name}")
                         else:
-                            # If we can't check for duplicates, use pandas to_sql
-                            filtered_df.to_sql(table_name, conn, if_exists='append', index=False)
-                            print(f"Inserted {len(filtered_df)} rows into {table_name} (could not check for duplicates)")
-                    else:
-                        # For PostgreSQL, use ON CONFLICT DO NOTHING
-                        if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
-                            # Check if the table has a unique constraint on (symbol, date)
-                            cursor.execute(f"""
-                                SELECT COUNT(*)
-                                FROM pg_constraint pc
-                                JOIN pg_class c ON pc.conrelid = c.oid
-                                JOIN pg_namespace n ON c.relnamespace = n.oid
-                                JOIN pg_attribute a1 ON a1.attrelid = c.oid AND a1.attnum = ANY(pc.conkey)
-                                JOIN pg_attribute a2 ON a2.attrelid = c.oid AND a2.attnum = ANY(pc.conkey)
-                                WHERE c.relname = '{table_name}'
-                                  AND pc.contype = 'u'
-                                  AND a1.attname = 'symbol'
-                                  AND a2.attname = 'date'
-                            """)
-                            has_unique_constraint = cursor.fetchone()[0] > 0
-                            
-                            # If there's no unique constraint for financial_ratios, add one
-                            if not has_unique_constraint and table_name == 'financial_ratios':
-                                print(f"Adding unique constraint on (symbol, date) to {table_name}")
-                                
-                                # First, remove any duplicates
-                                cursor.execute(f"""
-                                    WITH duplicates AS (
-                                        SELECT id,
-                                               ROW_NUMBER() OVER (PARTITION BY symbol, date ORDER BY id) as row_num
-                                        FROM {table_name}
-                                    )
-                                    DELETE FROM {table_name}
-                                    WHERE id IN (
-                                        SELECT id FROM duplicates WHERE row_num > 1
-                                    )
-                                """)
-                                conn.commit()
-                                
-                                # Then add the constraint
-                                try:
-                                    cursor.execute(f"""
-                                        ALTER TABLE {table_name}
-                                        ADD CONSTRAINT {table_name}_symbol_date_unique UNIQUE (symbol, date)
-                                    """)
-                                    conn.commit()
-                                    has_unique_constraint = True
-                                    print(f"Added unique constraint to {table_name}")
-                                except Exception as e:
-                                    print(f"Error adding unique constraint to {table_name}: {e}")
-                            
-                            # Prepare data for insertion
-                            columns = filtered_df.columns.tolist()
-                            quoted_columns = [f'"{col}"' for col in columns]
-                            placeholders = ", ".join(["%s"] * len(columns))
-                            
-                            # Build INSERT statement with appropriate conflict handling
-                            if has_unique_constraint:
-                                insert_sql = f"""
-                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
-                                    VALUES ({placeholders}) 
-                                    ON CONFLICT (symbol, date) DO NOTHING
-                                """
-                            else:
-                                # For tables without unique constraint, use DO NOTHING without specifying columns
-                                # This will rely on primary key constraint if any
-                                insert_sql = f"""
-                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
-                                    VALUES ({placeholders}) 
-                                    ON CONFLICT DO NOTHING
-                                """
-                            
-                            # Convert any None/NaN values to PostgreSQL NULL
-                            filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                            
-                            # Insert data in chunks
-                            data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                            chunk_size = 1000
-                            inserted_count = 0
-                            
-                            for i in range(0, len(data_tuples), chunk_size):
-                                chunk = data_tuples[i:i + chunk_size]
+                            # For tables without unique constraint, use simple INSERT
+                            insert_sql = f"""
+                                INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                VALUES ({placeholders})
+                            """
+                            print(f"Using simple INSERT for {table_name} (no unique constraint)")
+                        
+                        # Convert any None/NaN values to PostgreSQL NULL
+                        filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                        
+                        # Insert data in chunks
+                        data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                        chunk_size = 1000
+                        inserted_count = 0
+                        
+                        for i in range(0, len(data_tuples), chunk_size):
+                            chunk = data_tuples[i:i + chunk_size]
+                            try:
                                 cursor.executemany(insert_sql, chunk)
                                 inserted_count += cursor.rowcount
                                 conn.commit()
-                                
-                            skipped_count = len(filtered_df) - inserted_count
-                            print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
-                        else:
-                            # Check if the table has a primary key
-                            cursor.execute(f"""
-                                SELECT kcu.column_name
-                                FROM information_schema.table_constraints tc
-                                JOIN information_schema.key_column_usage kcu
-                                    ON tc.constraint_name = kcu.constraint_name
-                                WHERE tc.constraint_type = 'PRIMARY KEY'
-                                    AND tc.table_name = '{table_name}'
-                            """)
-                            primary_keys = [row[0] for row in cursor.fetchall()]
-                            
-                            if primary_keys:
-                                # If we have primary keys, use ON CONFLICT
-                                columns = filtered_df.columns.tolist()
-                                quoted_columns = [f'"{col}"' for col in columns]
-                                placeholders = ", ".join(["%s"] * len(columns))
-                                
-                                # Build INSERT statement with conflict handling on primary key
-                                insert_sql = f"""
-                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
-                                    VALUES ({placeholders}) 
-                                    ON CONFLICT DO NOTHING
-                                """
-                                
-                                # Convert any None/NaN values to PostgreSQL NULL
-                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                                
-                                # Insert data in chunks
-                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                                chunk_size = 1000
-                                inserted_count = 0
-                                
-                                for i in range(0, len(data_tuples), chunk_size):
-                                    chunk = data_tuples[i:i + chunk_size]
-                                    cursor.executemany(insert_sql, chunk)
-                                    inserted_count += cursor.rowcount
-                                    conn.commit()
-                                    
-                                skipped_count = len(filtered_df) - inserted_count
-                                print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
-                            else:
-                                # Without primary keys or symbol/date to check, insert all
-                                columns = filtered_df.columns.tolist()
-                                quoted_columns = [f'"{col}"' for col in columns]
-                                placeholders = ", ".join(["%s"] * len(columns))
-                                
-                                # Build simple INSERT statement
-                                insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders})'
-                                
-                                # Convert any None/NaN values to PostgreSQL NULL
-                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                                
-                                # Insert data in chunks
-                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                                chunk_size = 1000
-                                for i in range(0, len(data_tuples), chunk_size):
-                                    chunk = data_tuples[i:i + chunk_size]
-                                    cursor.executemany(insert_sql, chunk)
-                                    conn.commit()
-                                    
-                                print(f"Inserted {len(filtered_df)} rows into {table_name} (could not check for duplicates)")
-                except Exception as e:
-                    print(f"Error inserting {table_name} data: {e}")
-                    print(f"Error details: {str(e)}")
-            else:
-                print(f"No consolidated file found for {table_name}")
-                
-                # Try alternate file formats
-                for file in consolidated_files:
-                    if table_name.replace('_statements', '') in file or table_name.replace('_sheets', '') in file:
-                        print(f"Found possible match: {file} for table {table_name}")
-        
-        # After inserting data, verify tables have content
-        for table_name in table_names:
-            if USE_SQLITE:
-                try:
-                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    count = cursor.fetchone()[0]
-                    print(f"Table {table_name} has {count} rows")
-                except Exception as e:
-                    print(f"Error counting rows in {table_name}: {e}")
-            else:
-                try:
-                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    count = cursor.fetchone()[0]
-                    print(f"Table {table_name} has {count} rows")
-                except Exception as e:
-                    print(f"Error counting rows in {table_name}: {e}")
-        
-        conn.close()
-        print("Data migration to database complete")
-    except Exception as e:
-        print(f"Error during database migration: {e}")
+                            except Exception as e:
+                                print(f"Error inserting chunk: {e}")
+                                conn.rollback()
+                        
+                        print(f"Inserted {inserted_count} rows into {table_name}")
+                    else:
+                        # For tables without symbol/date columns, use simple INSERT
+                        columns = filtered_df.columns.tolist()
+                        quoted_columns = [f'"{col}"' for col in columns]
+                        placeholders = ", ".join(["%s"] * len(columns))
+                        
+                        # Build simple INSERT statement
+                        insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders})'
+                        
+                        # Convert any None/NaN values to PostgreSQL NULL
+                        filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                        
+                        # Insert data in chunks
+                        data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                        chunk_size = 1000
+                        for i in range(0, len(data_tuples), chunk_size):
+                            chunk = data_tuples[i:i + chunk_size]
+                            cursor.executemany(insert_sql, chunk)
+                            conn.commit()
+                        
+                        print(f"Inserted {len(filtered_df)} rows into {table_name}")
+            except Exception as e:
+                print(f"Error inserting {table_name} data: {e}")
+                traceback.print_exc()
+        except Exception as e:
+            print(f"Error processing table {table_name}: {e}")
+            traceback.print_exc()
+            
+    # Close the connection
+    conn.close()
+    return True
 
 def migrate_to_consolidated_tables():
     """Migrate data from traditional tables to consolidated financial_metrics and text_metrics tables"""
@@ -1905,6 +1741,22 @@ def migrate_financial_tables():
                 data_source = row.get('data_source')
                 fiscalquarter = get_quarter_from_period(period)
                 
+                # Validate data before checking for duplicates
+                if not symbol or not date:
+                    print(f"Skipping record from {table_name} with missing symbol or date: ID={row.get('id', 'unknown')}")
+                    skipped_rows += 1
+                    continue
+                
+                # Standardize date format if it's a string
+                if isinstance(date, str):
+                    try:
+                        # Try to convert to standard date format YYYY-MM-DD
+                        date_obj = pd.to_datetime(date)
+                        date = date_obj.strftime('%Y-%m-%d')
+                    except:
+                        # If conversion fails, keep original
+                        pass
+                
                 # Check if data already exists for this symbol, date, and metric_type
                 if USE_SQLITE:
                     check_cursor = conn.cursor()
@@ -1923,7 +1775,11 @@ def migrate_financial_tables():
                         exists = check_cursor.fetchone()[0] > 0
                 
                 if exists:
-                    print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping")
+                    # Add more details to help debug the issue
+                    print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping. (Record ID: {row.get('id', 'unknown')})")
+                    # Log additional information only when debugging
+                    if metric_type in ['income', 'balance', 'cash_flow', 'ratio']:
+                        print(f"  Source: {table_name}, Fiscal year: {fiscalyear}, Period: {period}")
                     skipped_rows += 1
                     continue
                 

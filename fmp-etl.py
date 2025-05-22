@@ -20,6 +20,10 @@ parser.add_argument('--symbols', type=str, help='Comma-separated list of ticker 
 parser.add_argument('--db-type', type=str, choices=['sqlite', 'postgres'], default='sqlite', help='Database type to use (default: sqlite)')
 parser.add_argument('--limit', type=int, default=3, help='Number of symbols to process (default: 3)')
 parser.add_argument('--db-name', type=str, help='Database name for PostgreSQL (default: finmetrics)')
+parser.add_argument('--price-targets-only', action='store_true', help='Only fetch price target data')
+parser.add_argument('--peers-only', action='store_true', help='Only fetch stock peers data')
+parser.add_argument('--peers-with-data', action='store_true', help='Fetch stock peers and their financial data')
+parser.add_argument('--migrate-only', action='store_true', help='Only migrate CSV data to database without fetching')
 args = parser.parse_args()
 
 # API configuration
@@ -68,6 +72,20 @@ for subdir in ["raw", "csv", "consolidated"]:
 
 # API endpoints to fetch
 ENDPOINTS = {
+    "enterprise_values": {
+        "url": "/enterprise-values",
+        "params": ["symbol"],
+        "quarterly": False,
+        "table_name": "enterprise_values",
+        "metric_type": "enterprise_value"
+    },
+    "dcf": {
+        "url": "/custom-discounted-cash-flow",
+        "params": ["symbol"],
+        "quarterly": False,
+        "table_name": "discounted_cash_flow",
+        "metric_type": "dcf"
+    },
     "earning_call_transcript": {
         "url": "/earning-call-transcript",
         "params": ["symbol", "year", "quarter"],
@@ -121,6 +139,14 @@ ENDPOINTS = {
         "quarterly": False,
         "table_name": "company_news",
         "metric_type": "news"
+    },
+    "price_target_news": {
+        "url": "/price-target-news",
+        "params": ["symbol"],
+        "additional_params": {"page": 0, "limit": 5},
+        "quarterly": False,
+        "table_name": "price_targets",
+        "metric_type": "price_target"
     }
 }
 
@@ -130,7 +156,9 @@ FINANCIAL_TABLES = {
     'balance': 'balance_sheets',
     'cash_flow': 'cash_flow_statements',
     'ratio': 'financial_ratios',
-    'analyst': 'analyst_estimates'
+    'analyst': 'analyst_estimates',
+    'enterprise_value': 'enterprise_values',
+    'dcf': 'discounted_cash_flow'
 }
 
 TEXT_TABLES = {
@@ -217,8 +245,12 @@ def fetch_api_data(endpoint_name, endpoint_config, symbol, year=None, quarter=No
     if "symbols" in endpoint_config["params"]:
         params["symbols"] = symbol
     
-    if year is not None and "year" in endpoint_config["params"]:
-        params["year"] = year
+    if year is not None:
+        if endpoint_name in ["income_statement", "balance_sheet_statement", "cash_flow_statement"]:
+            # For financial statements, use the year parameter directly
+            params["year"] = year
+        elif "year" in endpoint_config["params"]:
+            params["year"] = year
     
     if quarter is not None and "quarter" in endpoint_config["params"]:
         params["quarter"] = quarter
@@ -317,6 +349,12 @@ def save_to_csv(data, endpoint_name, symbol, year=None, quarter=None, period=Non
             
             # Add data source column
             df["data_source"] = endpoint_name
+            
+            # Special handling for price targets
+            if endpoint_name == "price_target_news":
+                # Calculate bullish flag (1 if price target >= price when posted, 0 otherwise)
+                if "priceTarget" in df.columns and "priceWhenPosted" in df.columns:
+                    df["bullish"] = df.apply(lambda row: 1 if row["priceTarget"] >= row["priceWhenPosted"] else 0, axis=1)
             
             df.to_csv(filepath, index=False)
             print(f"Saved to {filepath}")
@@ -741,6 +779,83 @@ def create_database_schema():
             );
             """)
             
+            # Enterprise values
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS enterprise_values (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                date TEXT,
+                stockPrice REAL,
+                numberOfShares REAL,
+                marketCapitalization REAL,
+                minusCashAndCashEquivalents REAL,
+                addTotalDebt REAL,
+                enterpriseValue REAL,
+                data_source TEXT
+            );
+            """)
+            
+            # Discounted cash flow
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS discounted_cash_flow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                year TEXT,
+                revenue REAL,
+                revenuePercentage REAL,
+                capitalExpenditure REAL,
+                capitalExpenditurePercentage REAL,
+                price REAL,
+                beta REAL,
+                dilutedSharesOutstanding REAL,
+                costofDebt REAL,
+                taxRate REAL,
+                afterTaxCostOfDebt REAL,
+                riskFreeRate REAL,
+                marketRiskPremium REAL,
+                costOfEquity REAL,
+                totalDebt REAL,
+                totalEquity REAL,
+                totalCapital REAL,
+                debtWeighting REAL,
+                equityWeighting REAL,
+                wacc REAL,
+                operatingCashFlow REAL,
+                pvLfcf REAL,
+                sumPvLfcf REAL,
+                longTermGrowthRate REAL,
+                freeCashFlow REAL,
+                terminalValue REAL,
+                presentTerminalValue REAL,
+                enterpriseValue REAL,
+                netDebt REAL,
+                equityValue REAL,
+                equityValuePerShare REAL,
+                freeCashFlowT1 REAL,
+                operatingCashFlowPercentage REAL,
+                date TEXT,
+                data_source TEXT
+            );
+            """)
+            
+            # Price targets
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS price_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                publishedDate TEXT,
+                newsURL TEXT,
+                newsTitle TEXT,
+                analystName TEXT,
+                analystCompany TEXT,
+                priceTarget REAL,
+                priceWhenPosted REAL,
+                bullish INTEGER,
+                newsPublisher TEXT,
+                data_source TEXT
+            );
+            """)
+            
             # Create indexes for performance
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_financial_metrics_symbol ON financial_metrics(symbol);')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_text_metrics_symbol ON text_metrics(symbol);')
@@ -1034,6 +1149,132 @@ def create_database_schema():
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_analyst_estimates_symbol ON analyst_estimates(symbol);')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_earnings_transcripts_symbol ON earnings_transcripts(symbol);')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_company_news_symbol ON company_news(symbol);')
+            
+            # Enterprise values
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS enterprise_values (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(20) NOT NULL,
+                date DATE,
+                stockPrice NUMERIC,
+                numberOfShares NUMERIC,
+                marketCapitalization NUMERIC,
+                minusCashAndCashEquivalents NUMERIC,
+                addTotalDebt NUMERIC,
+                enterpriseValue NUMERIC,
+                data_source VARCHAR(50)
+            );
+            """)
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_enterprise_values_symbol ON enterprise_values(symbol);')
+            
+            # Discounted cash flow
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS discounted_cash_flow (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(20) NOT NULL,
+                year VARCHAR(10),
+                revenue NUMERIC,
+                revenuePercentage NUMERIC,
+                capitalExpenditure NUMERIC,
+                capitalExpenditurePercentage NUMERIC,
+                price NUMERIC,
+                beta NUMERIC,
+                dilutedSharesOutstanding NUMERIC,
+                costofDebt NUMERIC,
+                taxRate NUMERIC,
+                afterTaxCostOfDebt NUMERIC,
+                riskFreeRate NUMERIC,
+                marketRiskPremium NUMERIC,
+                costOfEquity NUMERIC,
+                totalDebt NUMERIC,
+                totalEquity NUMERIC, 
+                totalCapital NUMERIC,
+                debtWeighting NUMERIC,
+                equityWeighting NUMERIC,
+                wacc NUMERIC,
+                operatingCashFlow NUMERIC,
+                pvLfcf NUMERIC,
+                sumPvLfcf NUMERIC,
+                longTermGrowthRate NUMERIC,
+                freeCashFlow NUMERIC,
+                terminalValue NUMERIC,
+                presentTerminalValue NUMERIC,
+                enterpriseValue NUMERIC,
+                netDebt NUMERIC,
+                equityValue NUMERIC,
+                equityValuePerShare NUMERIC,
+                freeCashFlowT1 NUMERIC,
+                operatingCashFlowPercentage NUMERIC,
+                date DATE,
+                data_source VARCHAR(50)
+            );
+            """)
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_discounted_cash_flow_symbol ON discounted_cash_flow(symbol);')
+            
+            # Price targets
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS price_targets (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(20) NOT NULL,
+                publishedDate DATE,
+                newsURL TEXT,
+                newsTitle TEXT,
+                analystName VARCHAR(100),
+                analystCompany VARCHAR(100),
+                priceTarget NUMERIC,
+                priceWhenPosted NUMERIC,
+                bullish INTEGER,
+                newsPublisher VARCHAR(100),
+                data_source VARCHAR(50)
+            );
+            """)
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_price_targets_symbol ON price_targets(symbol);')
+
+            # Create analyst estimates table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS analyst_estimates (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                date DATE,
+                revenue_low BIGINT,
+                revenue_high BIGINT,
+                revenue_avg BIGINT,
+                ebitda_low BIGINT,
+                ebitda_high BIGINT,
+                ebitda_avg BIGINT,
+                ebit_low BIGINT,
+                ebit_high BIGINT,
+                ebit_avg BIGINT,
+                net_income_low BIGINT,
+                net_income_high BIGINT,
+                net_income_avg BIGINT,
+                sga_expense_low BIGINT,
+                sga_expense_high BIGINT,
+                sga_expense_avg BIGINT,
+                eps_avg FLOAT,
+                eps_high FLOAT,
+                eps_low FLOAT,
+                num_analysts_revenue INT,
+                num_analysts_eps INT
+            );
+            """)
+
+            # Create price target news table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS price_target_news (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                published_date TIMESTAMP,
+                news_url TEXT,
+                news_title TEXT,
+                analyst_name TEXT,
+                price_target FLOAT,
+                adj_price_target FLOAT,
+                price_when_posted FLOAT,
+                news_publisher TEXT,
+                analyst_company TEXT
+            );
+            """)
         conn.commit()
         print(f"Database schema created successfully for {('SQLite' if USE_SQLITE else 'PostgreSQL')}")
     except Exception as e:
@@ -1158,33 +1399,143 @@ def migrate_data_to_database(master_df):
                     print(f"Found {len(filtered_df.columns)} matching columns: {filtered_df.columns.tolist()}")
                     print(f"Found {len(filtered_df)} rows to insert into {table_name}")
                     
+                    # Count of records inserted and skipped
+                    inserted_count = 0
+                    skipped_count = 0
+                    
                     if USE_SQLITE:
-                        # For SQLite, use pandas to_sql method 
-                        filtered_df.to_sql(table_name, conn, if_exists='append', index=False)
-                        print(f"Inserted {len(filtered_df)} rows into {table_name}")
-                    else:
-                        # For PostgreSQL, use prepared statements in chunks
-                        # Prepare data for insertion
-                        columns = filtered_df.columns.tolist()
-                        quoted_columns = [f'"{col}"' for col in columns]
-                        placeholders = ", ".join(["%s"] * len(columns))
-                        
-                        # Build INSERT statement
-                        insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING'
-                        
-                        # Convert any None/NaN values to PostgreSQL NULL
-                        filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
-                        
-                        # Insert data in chunks
-                        data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
-                        chunk_size = 1000
-                        for i in range(0, len(data_tuples), chunk_size):
-                            chunk = data_tuples[i:i + chunk_size]
-                            cursor.executemany(insert_sql, chunk)
+                        # For SQLite, check each row for existence before inserting
+                        if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
+                            # Convert filtered_df to a list of dictionaries for easier processing
+                            records = filtered_df.to_dict('records')
+                            
+                            for record in records:
+                                # Check if record already exists
+                                symbol = record.get('symbol')
+                                date = record.get('date')
+                                
+                                if symbol and date:
+                                    cursor.execute(f"""
+                                        SELECT COUNT(*) FROM {table_name} 
+                                        WHERE symbol = ? AND date = ?
+                                    """, (symbol, date))
+                                    
+                                    if cursor.fetchone()[0] > 0:
+                                        skipped_count += 1
+                                        continue
+                                
+                                # Build placeholders and values for the INSERT
+                                placeholders = ', '.join(['?'] * len(record))
+                                columns = ', '.join(record.keys())
+                                values = list(record.values())
+                                
+                                # Insert the record
+                                cursor.execute(f"""
+                                    INSERT INTO {table_name} ({columns})
+                                    VALUES ({placeholders})
+                                """, values)
+                                
+                                inserted_count += 1
+                            
                             conn.commit()
-                            print(f"Inserted chunk {i//chunk_size + 1} ({len(chunk)} rows) into {table_name}")
-                        
-                        print(f"Inserted {len(filtered_df)} rows into {table_name}")
+                            print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
+                        else:
+                            # If we can't check for duplicates, use pandas to_sql
+                            filtered_df.to_sql(table_name, conn, if_exists='append', index=False)
+                            print(f"Inserted {len(filtered_df)} rows into {table_name} (could not check for duplicates)")
+                    else:
+                        # For PostgreSQL, use ON CONFLICT DO NOTHING
+                        if 'symbol' in filtered_df.columns and 'date' in filtered_df.columns:
+                            # Prepare data for insertion
+                            columns = filtered_df.columns.tolist()
+                            quoted_columns = [f'"{col}"' for col in columns]
+                            placeholders = ", ".join(["%s"] * len(columns))
+                            
+                            # Build INSERT statement with conflict handling
+                            insert_sql = f"""
+                                INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                VALUES ({placeholders}) 
+                                ON CONFLICT (symbol, date) DO NOTHING
+                            """
+                            
+                            # Convert any None/NaN values to PostgreSQL NULL
+                            filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                            
+                            # Insert data in chunks
+                            data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                            chunk_size = 1000
+                            inserted_count = 0
+                            
+                            for i in range(0, len(data_tuples), chunk_size):
+                                chunk = data_tuples[i:i + chunk_size]
+                                cursor.executemany(insert_sql, chunk)
+                                inserted_count += cursor.rowcount
+                                conn.commit()
+                                
+                            skipped_count = len(filtered_df) - inserted_count
+                            print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
+                        else:
+                            # Check if the table has a primary key
+                            cursor.execute(f"""
+                                SELECT kcu.column_name
+                                FROM information_schema.table_constraints tc
+                                JOIN information_schema.key_column_usage kcu
+                                    ON tc.constraint_name = kcu.constraint_name
+                                WHERE tc.constraint_type = 'PRIMARY KEY'
+                                    AND tc.table_name = '{table_name}'
+                            """)
+                            primary_keys = [row[0] for row in cursor.fetchall()]
+                            
+                            if primary_keys:
+                                # If we have primary keys, use ON CONFLICT
+                                columns = filtered_df.columns.tolist()
+                                quoted_columns = [f'"{col}"' for col in columns]
+                                placeholders = ", ".join(["%s"] * len(columns))
+                                
+                                # Build INSERT statement with conflict handling on primary key
+                                insert_sql = f"""
+                                    INSERT INTO {table_name} ({", ".join(quoted_columns)}) 
+                                    VALUES ({placeholders}) 
+                                    ON CONFLICT DO NOTHING
+                                """
+                                
+                                # Convert any None/NaN values to PostgreSQL NULL
+                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                                
+                                # Insert data in chunks
+                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                                chunk_size = 1000
+                                inserted_count = 0
+                                
+                                for i in range(0, len(data_tuples), chunk_size):
+                                    chunk = data_tuples[i:i + chunk_size]
+                                    cursor.executemany(insert_sql, chunk)
+                                    inserted_count += cursor.rowcount
+                                    conn.commit()
+                                    
+                                skipped_count = len(filtered_df) - inserted_count
+                                print(f"Inserted {inserted_count} rows into {table_name} (skipped {skipped_count} existing rows)")
+                            else:
+                                # Without primary keys or symbol/date to check, insert all
+                                columns = filtered_df.columns.tolist()
+                                quoted_columns = [f'"{col}"' for col in columns]
+                                placeholders = ", ".join(["%s"] * len(columns))
+                                
+                                # Build simple INSERT statement
+                                insert_sql = f'INSERT INTO {table_name} ({", ".join(quoted_columns)}) VALUES ({placeholders})'
+                                
+                                # Convert any None/NaN values to PostgreSQL NULL
+                                filtered_df = filtered_df.where(pd.notnull(filtered_df), None)
+                                
+                                # Insert data in chunks
+                                data_tuples = [tuple(x) for x in filtered_df.to_numpy()]
+                                chunk_size = 1000
+                                for i in range(0, len(data_tuples), chunk_size):
+                                    chunk = data_tuples[i:i + chunk_size]
+                                    cursor.executemany(insert_sql, chunk)
+                                    conn.commit()
+                                    
+                                print(f"Inserted {len(filtered_df)} rows into {table_name} (could not check for duplicates)")
                 except Exception as e:
                     print(f"Error inserting {table_name} data: {e}")
                     print(f"Error details: {str(e)}")
@@ -1232,11 +1583,198 @@ def migrate_to_consolidated_tables():
     
     print("\nMigration to consolidated tables completed successfully!")
 
+def calculate_additional_metrics(metrics):
+    """Calculate additional financial metrics"""
+    symbol = metrics.get('symbol')
+    date = metrics.get('date')
+    
+    if not symbol or not date:
+        return metrics
+    
+    # Helper function to find a value from multiple possible keys
+    def find_value(possible_keys):
+        for key in possible_keys:
+            if key in metrics and metrics[key] is not None:
+                return metrics[key]
+        return None
+    
+    # Helper function to fetch a value from another table
+    def fetch_from_table(table_name, field_names, symbol, date):
+        conn = None
+        try:
+            conn = connect_to_db()
+            cursor = conn.cursor()
+            
+            # Build field list
+            field_list = ", ".join(field_names)
+            
+            # Use different parameter placeholders based on database type
+            if USE_SQLITE:
+                placeholder = "?"
+                like_operator = "LIKE"
+                date_cast = ""
+            else:
+                placeholder = "%s"  # For PostgreSQL
+                like_operator = "LIKE"  # Regular LIKE is fine
+                date_cast = "::text"  # Cast date to text for pattern matching
+            
+            # Try exact date match first
+            query = f"SELECT {field_list} FROM {table_name} WHERE symbol = {placeholder} AND date = {placeholder} LIMIT 1"
+            cursor.execute(query, (symbol, date))
+            row = cursor.fetchone()
+            
+            if row:
+                return dict(zip(field_names, row))
+                
+            # If not found, try approximate date match (same year/month)
+            if len(date) >= 7:  # Has at least year-month
+                year_month = date[:7]  # Extract YYYY-MM
+                query = f"SELECT {field_list} FROM {table_name} WHERE symbol = {placeholder} AND date{date_cast} {like_operator} {placeholder} LIMIT 1"
+                cursor.execute(query, (symbol, f"{year_month}%"))
+                row = cursor.fetchone()
+                
+                if row:
+                    return dict(zip(field_names, row))
+                    
+            # Try same year
+            if len(date) >= 4:  # Has at least year
+                year = date[:4]  # Extract YYYY
+                query = f"SELECT {field_list} FROM {table_name} WHERE symbol = {placeholder} AND date{date_cast} {like_operator} {placeholder} LIMIT 1"
+                cursor.execute(query, (symbol, f"{year}%"))
+                row = cursor.fetchone()
+                
+                if row:
+                    return dict(zip(field_names, row))
+                
+            return None
+        except Exception as e:
+            print(f"Error fetching from {table_name}: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+    
+    # Get values for the calculations
+    # For enterprise value, check both the enterprise_values table and metrics
+    ev_data = fetch_from_table('enterprise_values', ['enterpriseValue', 'numberOfShares', 'addTotalDebt'], symbol, date)
+    dcf_data = fetch_from_table('discounted_cash_flow', ['dilutedSharesOutstanding'], symbol, date)
+    
+    # Extract enterprise value
+    ev_value = None
+    if ev_data and ev_data['enterpriseValue'] is not None:
+        ev_value = ev_data['enterpriseValue']
+        print(f"Found enterpriseValue from API: {ev_value}")
+    else:
+        # Calculate enterprise value from ratios if not available directly
+        ebitda_value = find_value(['ebitda'])
+        enterprise_value_multiple = find_value(['enterprisevaluemultiple', 'enterprisevaluetoebitda'])
+        
+        if ebitda_value is not None and enterprise_value_multiple is not None:
+            ev_value = ebitda_value * enterprise_value_multiple
+            print(f"Calculated enterpriseValue from multiple: {ev_value} = {ebitda_value} * {enterprise_value_multiple}")
+    
+    # Get total debt value
+    total_debt_value = None
+    if ev_data and ev_data['addTotalDebt'] is not None:
+        total_debt_value = ev_data['addTotalDebt']
+        print(f"Found totalDebt from API: {total_debt_value}")
+    else:
+        total_debt_value = find_value(['totaldebt'])
+        if total_debt_value is not None:
+            print(f"Found totalDebt from metrics: {total_debt_value}")
+    
+    # Get number of shares
+    number_of_shares = None
+    if ev_data and ev_data['numberOfShares'] is not None:
+        number_of_shares = ev_data['numberOfShares']
+        print(f"Found numberOfShares from API: {number_of_shares}")
+    
+    # Get diluted shares outstanding
+    diluted_shares_outstanding = None
+    if dcf_data and dcf_data['dilutedSharesOutstanding'] is not None:
+        diluted_shares_outstanding = dcf_data['dilutedSharesOutstanding']
+        print(f"Found dilutedSharesOutstanding from API: {diluted_shares_outstanding}")
+    
+    # Get EBITDA, EBIT, and revenue values
+    ebitda_value = find_value(['ebitda'])
+    ebit_value = find_value(['operatingincome', 'ebit'])
+    sales_value = find_value(['revenue', 'totalrevenue', 'sales'])
+    interest_expense_value = find_value(['interestexpense'])
+    capex_value = find_value(['capitalexpenditure'])
+    totalequity_value = find_value(['totalstockholdersequity'])
+    earnings_value = find_value(['netincome'])
+    price_value = find_value(['stockprice', 'price'])
+    fcf_value = find_value(['freecashflow'])
+    
+    # Calculate new metrics
+    if sales_value is not None:
+        metrics['sales'] = sales_value
+    
+    # Add API-sourced metrics
+    if number_of_shares is not None:
+        metrics['numberOfShares'] = number_of_shares
+    
+    if diluted_shares_outstanding is not None:
+        metrics['dilutedSharesOutstanding'] = diluted_shares_outstanding
+    
+    # Calculate EV/Sales ratio
+    if ev_value is not None and sales_value is not None and sales_value != 0:
+        metrics['ev_sales_ratio'] = ev_value / sales_value
+        print(f"Calculated ev_sales_ratio: {metrics['ev_sales_ratio']} = {ev_value} / {sales_value}")
+    
+    # Calculate EV/EBIT ratio
+    if ev_value is not None and ebit_value is not None and ebit_value != 0:
+        metrics['ev_ebit_ratio'] = ev_value / ebit_value
+        print(f"Calculated ev_ebit_ratio: {metrics['ev_ebit_ratio']} = {ev_value} / {ebit_value}")
+    
+    # Calculate interest coverage ratios
+    if ebitda_value is not None and interest_expense_value is not None and interest_expense_value != 0:
+        metrics['ebitda_interestexpense_ratio'] = ebitda_value / interest_expense_value
+        print(f"Calculated ebitda_interestexpense_ratio: {metrics['ebitda_interestexpense_ratio']} = {ebitda_value} / {interest_expense_value}")
+    
+    if ebit_value is not None and interest_expense_value is not None and interest_expense_value != 0:
+        metrics['ebit_interestexpense_ratio'] = ebit_value / interest_expense_value
+        print(f"Calculated ebit_interestexpense_ratio: {metrics['ebit_interestexpense_ratio']} = {ebit_value} / {interest_expense_value}")
+    
+    # Calculate EBITDA less capex to interest expense ratio
+    if ebitda_value is not None and capex_value is not None and interest_expense_value is not None and interest_expense_value != 0:
+        ebitda_less_capex = ebitda_value - abs(capex_value)  # capex is negative, so abs() to ensure subtraction
+        metrics['ebitdalesscapex_interestexpense_ratio'] = ebitda_less_capex / interest_expense_value
+        print(f"Calculated ebitdalesscapex_interestexpense_ratio: {metrics['ebitdalesscapex_interestexpense_ratio']} = ({ebitda_value} - {abs(capex_value)}) / {interest_expense_value}")
+    
+    # Calculate total debt to enterprise value ratio
+    if total_debt_value is not None and ev_value is not None and ev_value != 0:
+        metrics['totaldebt_ev_ratio'] = total_debt_value / ev_value
+        print(f"Calculated totaldebt_ev_ratio: {metrics['totaldebt_ev_ratio']} = {total_debt_value} / {ev_value}")
+    
+    # Calculate debt to equity ratio
+    if total_debt_value is not None and totalequity_value is not None and totalequity_value != 0:
+        metrics['debt_to_equity_ratio'] = total_debt_value / totalequity_value
+        print(f"Calculated debt_to_equity_ratio: {metrics['debt_to_equity_ratio']} = {total_debt_value} / {totalequity_value}")
+    
+    # Calculate PE ratio 
+    if price_value is not None and earnings_value is not None and earnings_value != 0:
+        metrics['pe_ratio'] = price_value / earnings_value
+        print(f"Calculated pe_ratio: {metrics['pe_ratio']} = {price_value} / {earnings_value}")
+    
+    # Add free cash flow
+    if fcf_value is not None:
+        metrics['free_cash_flow'] = fcf_value
+        
+        # Calculate FCF yield if market cap is available
+        if ev_data and ev_data['marketCapitalization'] is not None and ev_data['marketCapitalization'] != 0:
+            market_cap = ev_data['marketCapitalization']
+            metrics['fcf_yield'] = fcf_value / market_cap
+            print(f"Calculated fcf_yield: {metrics['fcf_yield']} = {fcf_value} / {market_cap}")
+    
+    return metrics
+
 def migrate_financial_tables():
     """Migrate data from financial tables to consolidated financial_metrics table"""
     conn = connect_to_db()
     
     total_rows = 0
+    skipped_rows = 0
     
     try:
         for metric_type, table_name in FINANCIAL_TABLES.items():
@@ -1299,7 +1837,7 @@ def migrate_financial_tables():
                 with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                     cursor.execute(f'SELECT * FROM "{table_name}"')
                     rows = cursor.fetchall()
-                
+            
             print(f"Migrating {len(rows)} rows from {table_name} to financial_metrics...")
             
             # Process each row
@@ -1313,6 +1851,28 @@ def migrate_financial_tables():
                 data_source = row.get('data_source')
                 fiscalquarter = get_quarter_from_period(period)
                 
+                # Check if data already exists for this symbol, date, and metric_type
+                if USE_SQLITE:
+                    check_cursor = conn.cursor()
+                    check_cursor.execute("""
+                        SELECT COUNT(*) FROM financial_metrics 
+                        WHERE symbol = ? AND date = ? AND metric_type = ?
+                    """, (symbol, date, metric_type))
+                    exists = check_cursor.fetchone()[0] > 0
+                    check_cursor.close()
+                else:
+                    with conn.cursor() as check_cursor:
+                        check_cursor.execute("""
+                            SELECT COUNT(*) FROM financial_metrics 
+                            WHERE symbol = %s AND date = %s AND metric_type = %s
+                        """, (symbol, date, metric_type))
+                        exists = check_cursor.fetchone()[0] > 0
+                
+                if exists:
+                    print(f"Data already exists for {symbol}, {date}, {metric_type} - skipping")
+                    skipped_rows += 1
+                    continue
+                
                 # Build metric values from remaining fields
                 metric_values = {}
                 for key, value in row.items():
@@ -1324,6 +1884,13 @@ def migrate_financial_tables():
                             continue  # Skip NaN values
                         else:
                             metric_values[key] = value
+                
+                # Calculate additional metrics
+                if metric_type in ['income', 'balance', 'cash_flow', 'ratio']:
+                    # Add symbol and date for the calculation function
+                    metric_values['symbol'] = symbol
+                    metric_values['date'] = date
+                    metric_values = calculate_additional_metrics(metric_values)
                 
                 # Insert into financial_metrics table
                 metric_values_json = json.dumps(metric_values)
@@ -1362,13 +1929,14 @@ def migrate_financial_tables():
     finally:
         conn.close()
     
-    print(f"Successfully migrated {total_rows} rows to financial_metrics table")
+    print(f"Successfully migrated {total_rows} rows to financial_metrics table (skipped {skipped_rows} existing rows)")
 
 def migrate_text_tables():
     """Migrate data from text-based tables to consolidated text_metrics table"""
     conn = connect_to_db()
     
     total_rows = 0
+    skipped_rows = 0
     
     try:
         for metric_type, table_name in TEXT_TABLES.items():
@@ -1472,6 +2040,28 @@ def migrate_text_tables():
                 title = row.get(title_col) if title_col else None
                 content = row.get(content_col) if content_col else None
                 
+                # Check if data already exists for this symbol, date, and metric_type
+                if USE_SQLITE:
+                    check_cursor = conn.cursor()
+                    check_cursor.execute("""
+                        SELECT COUNT(*) FROM text_metrics 
+                        WHERE symbol = ? AND date = ? AND metric_type = ?
+                    """, (symbol, date, metric_type))
+                    exists = check_cursor.fetchone()[0] > 0
+                    check_cursor.close()
+                else:
+                    with conn.cursor() as check_cursor:
+                        check_cursor.execute("""
+                            SELECT COUNT(*) FROM text_metrics 
+                            WHERE symbol = %s AND date = %s AND metric_type = %s
+                        """, (symbol, date, metric_type))
+                        exists = check_cursor.fetchone()[0] > 0
+                
+                if exists:
+                    print(f"Text data already exists for {symbol}, {date}, {metric_type} - skipping")
+                    skipped_rows += 1
+                    continue
+                
                 # Build metadata from remaining fields
                 metadata = {}
                 for key, value in row.items():
@@ -1525,7 +2115,250 @@ def migrate_text_tables():
     finally:
         conn.close()
     
-    print(f"Successfully migrated {total_rows} rows to text_metrics table")
+    print(f"Successfully migrated {total_rows} rows to text_metrics table (skipped {skipped_rows} existing rows)")
+
+def fetch_analyst_estimates(symbol):
+    """Fetch analyst estimates for a given symbol from the API."""
+    url = "https://financialmodelingprep.com/stable/analyst-estimates"
+    params = {
+        "symbol": symbol,
+        "period": "annual",
+        "page": 0,
+        "limit": 10,
+        "apikey": "fjRDKKnsRnVNMfFepDM6ox31u9RlPklv"
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error fetching analyst estimates: {response.status_code}")
+        return None
+
+def ensure_price_targets_table():
+    """Ensure price_targets table exists in both SQLite and PostgreSQL"""
+    if USE_SQLITE:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='price_targets'")
+            if not cursor.fetchone():
+                print("Creating price_targets table in SQLite...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS price_targets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        publishedDate TEXT,
+                        newsURL TEXT,
+                        newsTitle TEXT,
+                        analystName TEXT,
+                        priceTarget REAL,
+                        adjPriceTarget REAL,
+                        priceWhenPosted REAL,
+                        newsPublisher TEXT,
+                        newsBaseURL TEXT,
+                        analystCompany TEXT,
+                        data_source TEXT
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_price_targets_symbol ON price_targets(symbol)")
+                print("price_targets table created in SQLite")
+            else:
+                print("price_targets table already exists in SQLite")
+            
+            conn.commit()
+        except Exception as e:
+            print(f"Error ensuring price_targets table in SQLite: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'price_target_news'
+                )
+            """)
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("Creating price_target_news table in PostgreSQL...")
+                cursor.execute("""
+                    CREATE TABLE price_target_news (
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        published_date TIMESTAMP,
+                        news_url TEXT,
+                        news_title TEXT,
+                        analyst_name TEXT,
+                        price_target FLOAT,
+                        adj_price_target FLOAT,
+                        price_when_posted FLOAT,
+                        news_publisher TEXT,
+                        news_base_url TEXT,
+                        analyst_company TEXT
+                    )
+                """)
+                # Create index for better performance
+                cursor.execute('CREATE INDEX idx_price_target_news_symbol ON price_target_news(symbol)')
+                # Create unique constraint
+                cursor.execute("""
+                    CREATE UNIQUE INDEX idx_price_target_news_unique 
+                    ON price_target_news(symbol, published_date, COALESCE(analyst_name, ''), price_target)
+                """)
+                print("price_target_news table created in PostgreSQL")
+            else:
+                print("price_target_news table already exists in PostgreSQL")
+            
+            # Check if unique index exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_indexes 
+                    WHERE indexname = 'idx_price_target_news_unique'
+                )
+            """)
+            index_exists = cursor.fetchone()[0]
+            
+            if not index_exists:
+                print("Adding unique constraint to prevent duplicates...")
+                # Clear any duplicates first
+                cursor.execute("""
+                    DELETE FROM price_target_news
+                    WHERE id IN (
+                        SELECT id FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (PARTITION BY symbol, published_date, COALESCE(analyst_name, ''), price_target 
+                                                     ORDER BY id) as row_num
+                            FROM price_target_news
+                        ) t
+                        WHERE t.row_num > 1
+                    )
+                """)
+                
+                # Create unique constraint
+                cursor.execute("""
+                    CREATE UNIQUE INDEX idx_price_target_news_unique 
+                    ON price_target_news(symbol, published_date, COALESCE(analyst_name, ''), price_target)
+                """)
+                print("Unique constraint added")
+                
+            conn.commit()
+        except Exception as e:
+            print(f"Error ensuring price_target_news table in PostgreSQL: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+
+def fetch_price_target_news(symbol):
+    """Fetch price target news for a given symbol from the API."""
+    # Ensure price targets table exists
+    ensure_price_targets_table()
+    
+    url = "https://financialmodelingprep.com/stable/price-target-news"
+    params = {
+        "symbol": symbol,
+        "page": 0,
+        "limit": 10,
+        "apikey": API_KEY
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        
+        # Save raw data for debugging
+        save_raw_json(data, "price_target_news", symbol)
+        
+        # Insert into database directly
+        try:
+            conn = connect_to_db()
+            cursor = conn.cursor()
+            
+            inserted_count = 0
+            skipped_count = 0
+            for item in data:
+                # Extract the fields we need
+                symbol = item.get("symbol")
+                published_date = item.get("publishedDate")
+                news_url = item.get("newsURL")
+                news_title = item.get("newsTitle")
+                analyst_name = item.get("analystName", "") or ""  # Convert None to empty string
+                price_target = item.get("priceTarget")
+                adj_price_target = item.get("adjPriceTarget")
+                price_when_posted = item.get("priceWhenPosted")
+                news_publisher = item.get("newsPublisher")
+                news_base_url = item.get("newsBaseURL", "")
+                analyst_company = item.get("analystCompany", "") or ""  # Convert None to empty string
+                
+                try:
+                    # Check if we're using SQLite or PostgreSQL
+                    if USE_SQLITE:
+                        # Check if record already exists
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM price_targets 
+                            WHERE symbol = ? AND publishedDate = ? AND 
+                                  analystName = ? AND priceTarget = ?
+                        """, (symbol, published_date, analyst_name, price_target))
+                        
+                        if cursor.fetchone()[0] > 0:
+                            print(f"Price target already exists for {symbol}, {published_date}, {analyst_name} - skipping")
+                            skipped_count += 1
+                            continue
+                        
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO price_targets 
+                            (symbol, publishedDate, newsURL, newsTitle, analystName, 
+                             priceTarget, priceWhenPosted, analystCompany, newsPublisher, data_source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            symbol, published_date, news_url, news_title, analyst_name,
+                            price_target, price_when_posted, analyst_company, news_publisher, "price_target_news"
+                        ))
+                    else:
+                        # Check if record already exists
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM price_target_news 
+                            WHERE symbol = %s AND published_date = %s AND 
+                                  COALESCE(analyst_name, '') = %s AND price_target = %s
+                        """, (symbol, published_date, analyst_name, price_target))
+                        
+                        if cursor.fetchone()[0] > 0:
+                            print(f"Price target already exists for {symbol}, {published_date}, {analyst_name} - skipping")
+                            skipped_count += 1
+                            continue
+                        
+                        cursor.execute("""
+                            INSERT INTO price_target_news 
+                            (symbol, published_date, news_url, news_title, analyst_name, 
+                             price_target, adj_price_target, price_when_posted, news_publisher, 
+                             news_base_url, analyst_company)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
+                        """, (
+                            symbol, published_date, news_url, news_title, analyst_name,
+                            price_target, adj_price_target, price_when_posted, news_publisher, 
+                            news_base_url, analyst_company
+                        ))
+                    
+                    if cursor.rowcount > 0:
+                        inserted_count += 1
+                except Exception as e:
+                    print(f"Error inserting record: {e}")
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print(f"Processed {len(data)} price targets for {symbol}, inserted {inserted_count} new records, skipped {skipped_count} existing records")
+            return data
+        except Exception as e:
+            print(f"Error inserting price target news: {e}")
+            return data
+    else:
+        print(f"Error fetching price target news: {response.status_code}")
+        return None
 
 def process_symbol_data(symbol):
     """Process data for a single symbol"""
@@ -1541,9 +2374,25 @@ def process_symbol_data(symbol):
                 save_to_csv(data, transcript_endpoint, symbol, year, quarter)
                 time.sleep(1)
         
+        # Process quarterly financial statements for all years since 2020
+        quarterly_endpoints = ["income_statement", "balance_sheet_statement", "cash_flow_statement"]
+        for endpoint_name in quarterly_endpoints:
+            endpoint_config = ENDPOINTS[endpoint_name]
+            for year in YEARS:  # All years from 2020-2025
+                # Fetch quarterly data with year parameter
+                # Adding 'limit=400' to ensure we get all quarters for each year
+                if "additional_params" not in endpoint_config:
+                    endpoint_config["additional_params"] = {}
+                endpoint_config["additional_params"]["limit"] = 400
+                
+                # Fetch with both period=quarter and specific year
+                data = fetch_api_data(endpoint_name, endpoint_config, symbol, period="quarter", year=year)
+                save_to_csv(data, endpoint_name, symbol, year=year, period="quarter")
+                time.sleep(1)
+        
         # Process all other endpoints
         for endpoint_name, endpoint_config in ENDPOINTS.items():
-            if endpoint_name != "earning_call_transcript":
+            if endpoint_name != "earning_call_transcript" and endpoint_name not in quarterly_endpoints:
                 # Handle period-based endpoints
                 if "period_param" in endpoint_config:
                     # Annual data
@@ -1565,10 +2414,279 @@ def process_symbol_data(symbol):
     except Exception as e:
         return f"Error processing {symbol}: {str(e)}"
 
+def fetch_price_targets_only(symbols):
+    """Fetch only price target data for the given symbols"""
+    print(f"Fetching price target data for {len(symbols)} symbols")
+    
+    for symbol in symbols:
+        try:
+            print(f"Processing price target data for {symbol}")
+            data = fetch_price_target_news(symbol)
+            if data:
+                print(f"Found {len(data)} price targets for {symbol}")
+            else:
+                print(f"No price target data found for {symbol}")
+        except Exception as e:
+            print(f"Error processing price target data for {symbol}: {e}")
+
+def ensure_stock_peers_table():
+    """Ensure stock_peers table exists in both SQLite and PostgreSQL"""
+    if USE_SQLITE:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='stock_peers'")
+            if not cursor.fetchone():
+                print("Creating stock_peers table in SQLite...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_peers (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        peer_symbol TEXT NOT NULL,
+                        company_name TEXT,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, peer_symbol)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_peers_symbol ON stock_peers(symbol)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_peers_peer_symbol ON stock_peers(peer_symbol)")
+                print("stock_peers table created in SQLite")
+            else:
+                print("stock_peers table already exists in SQLite")
+            
+            conn.commit()
+        except Exception as e:
+            print(f"Error ensuring stock_peers table in SQLite: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+    else:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        try:
+            # Check if table exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'stock_peers'
+                )
+            """)
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("Creating stock_peers table in PostgreSQL...")
+                cursor.execute("""
+                    CREATE TABLE stock_peers (
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        peer_symbol TEXT NOT NULL,
+                        company_name TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(symbol, peer_symbol)
+                    )
+                """)
+                # Create indexes for better performance
+                cursor.execute('CREATE INDEX idx_stock_peers_symbol ON stock_peers(symbol)')
+                cursor.execute('CREATE INDEX idx_stock_peers_peer_symbol ON stock_peers(peer_symbol)')
+                print("stock_peers table created in PostgreSQL")
+            else:
+                print("stock_peers table already exists in PostgreSQL")
+                
+            conn.commit()
+        except Exception as e:
+            print(f"Error ensuring stock_peers table in PostgreSQL: {e}")
+        finally:
+            cursor.close()
+            conn.close()
+
+def fetch_stock_peers(symbol):
+    """Fetch stock peers for a given symbol from the API."""
+    # Ensure stock peers table exists
+    ensure_stock_peers_table()
+    
+    url = f"{BASE_URL}/stock-peers"
+    params = {
+        "symbol": symbol,
+        "apikey": API_KEY
+    }
+    response = requests.get(url, params=params)
+    
+    if response.status_code == 200:
+        data = response.json()
+        
+        # Save raw data for debugging
+        save_raw_json(data, "stock_peers", symbol)
+        
+        # Insert into database directly
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        
+        try:
+            # Instead of removing existing peers, we'll update them if they exist
+            # or insert new ones if they don't
+            
+            # Get existing peers
+            existing_peers = set()
+            if USE_SQLITE:
+                cursor.execute("SELECT peer_symbol FROM stock_peers WHERE symbol = ?", (symbol,))
+                existing_peers = {row[0] for row in cursor.fetchall()}
+            else:
+                cursor.execute("SELECT peer_symbol FROM stock_peers WHERE symbol = %s", (symbol,))
+                existing_peers = {row[0] for row in cursor.fetchall()}
+            
+            inserted_count = 0
+            updated_count = 0
+            skipped_count = 0
+            
+            for item in data:
+                # Extract the fields we need
+                peer_symbol = item.get("symbol")
+                company_name = item.get("companyName")
+                
+                # Skip if peer_symbol is the same as the main symbol
+                if peer_symbol == symbol:
+                    continue
+                
+                try:
+                    # Check if we're using SQLite or PostgreSQL
+                    if USE_SQLITE:
+                        if peer_symbol in existing_peers:
+                            # Update existing record
+                            cursor.execute("""
+                                UPDATE stock_peers 
+                                SET company_name = ?, updated_at = CURRENT_TIMESTAMP
+                                WHERE symbol = ? AND peer_symbol = ?
+                            """, (company_name, symbol, peer_symbol))
+                            updated_count += 1
+                        else:
+                            # Insert new record
+                            cursor.execute("""
+                                INSERT OR REPLACE INTO stock_peers 
+                                (symbol, peer_symbol, company_name)
+                                VALUES (?, ?, ?)
+                            """, (symbol, peer_symbol, company_name))
+                            inserted_count += 1
+                    else:
+                        if peer_symbol in existing_peers:
+                            # Update existing record
+                            cursor.execute("""
+                                UPDATE stock_peers 
+                                SET company_name = %s, updated_at = CURRENT_TIMESTAMP
+                                WHERE symbol = %s AND peer_symbol = %s
+                            """, (company_name, symbol, peer_symbol))
+                            updated_count += 1
+                        else:
+                            # Insert new record
+                            cursor.execute("""
+                                INSERT INTO stock_peers 
+                                (symbol, peer_symbol, company_name)
+                                VALUES (%s, %s, %s)
+                                ON CONFLICT (symbol, peer_symbol) DO UPDATE 
+                                SET company_name = EXCLUDED.company_name,
+                                    updated_at = CURRENT_TIMESTAMP
+                            """, (symbol, peer_symbol, company_name))
+                            inserted_count += 1
+                except Exception as e:
+                    print(f"Error inserting/updating peer record: {e}")
+                    skipped_count += 1
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print(f"Processed {len(data)} peers for {symbol}: inserted {inserted_count} new records, updated {updated_count} existing records, skipped {skipped_count} records")
+            return data
+        except Exception as e:
+            print(f"Error inserting stock peers: {e}")
+            conn.close()
+            return data
+    else:
+        print(f"Error fetching stock peers: {response.status_code}")
+        return None
+
+def fetch_peers_only(symbols):
+    """Fetch only stock peers data for the given symbols"""
+    print(f"Fetching stock peers data for {len(symbols)} symbols")
+    
+    for symbol in symbols:
+        try:
+            print(f"Processing stock peers data for {symbol}")
+            data = fetch_stock_peers(symbol)
+            if data:
+                print(f"Found {len(data)} peers for {symbol}")
+                
+                # If --peers-with-data flag is set, also fetch financial data for peers
+                if args.peers_with_data:
+                    fetch_peers_data(symbol)
+            else:
+                print(f"No stock peers data found for {symbol}")
+        except Exception as e:
+            print(f"Error processing stock peers data for {symbol}: {e}")
+
+def fetch_peers_data(symbol):
+    """Fetch stock peers and their financial data"""
+    print(f"Fetching stock peers and their financial data for {symbol}")
+    
+    # Step 1: Fetch and store peers
+    peers_data = fetch_stock_peers(symbol)
+    
+    if not peers_data or len(peers_data) == 0:
+        print(f"No peers found for {symbol}")
+        return
+    
+    # Step 2: Fetch financial data for each peer
+    for peer in peers_data:
+        peer_symbol = peer.get("symbol")
+        if peer_symbol == symbol:
+            continue  # Skip the original symbol
+            
+        print(f"Fetching financial data for peer: {peer_symbol}")
+        try:
+            # Process key financial endpoints for the peer
+            for endpoint_name in ["income_statement", "balance_sheet_statement", "cash_flow_statement", "ratios"]:
+                endpoint_config = ENDPOINTS[endpoint_name]
+                # Fetch annual data
+                annual_data = fetch_api_data(endpoint_name, endpoint_config, peer_symbol, period="annual")
+                save_to_csv(annual_data, endpoint_name, peer_symbol, period="annual")
+                # Fetch quarterly data
+                quarterly_data = fetch_api_data(endpoint_name, endpoint_config, peer_symbol, period="quarter")
+                save_to_csv(quarterly_data, endpoint_name, peer_symbol, period="quarter")
+                time.sleep(1)  # Avoid rate limiting
+            
+            print(f"Successfully fetched financial data for {peer_symbol}")
+        except Exception as e:
+            print(f"Error fetching financial data for peer {peer_symbol}: {e}")
+
 def main():
     """Main function to run the entire ETL process"""
     print(f"Starting financial data ETL process for {len(SYMBOLS)} symbols using {('SQLite' if USE_SQLITE else 'PostgreSQL')}")
     
+    # If price-targets-only flag is set, only fetch price target data
+    if args.price_targets_only:
+        fetch_price_targets_only(SYMBOLS)
+        print("\nPrice target data fetching completed!")
+        return
+    
+    # If peers-only flag is set, only fetch stock peers data
+    if args.peers_only or args.peers_with_data:
+        fetch_peers_only(SYMBOLS)
+        print("\nStock peers data fetching completed!")
+        return
+    
+    # If migrate-only flag is set, skip data collection and just migrate CSV to database
+    if args.migrate_only:
+        print("\n--- STEP 3: Creating master CSV ---")
+        master_df = create_master_csv()
+        
+        print("\n--- STEP 4: Migrating data to database ---")
+        migrate_data_to_database(master_df)
+        
+        print("\n--- STEP 5: Migrating data to consolidated tables ---")
+        migrate_to_consolidated_tables()
+        
+        print("\nData migration completed!")
+        return
+        
     # Step 1: Collect financial data from FMP API with concurrent requests
     print("\n--- STEP 1: Collecting data from FMP API ---")
     
